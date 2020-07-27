@@ -71,7 +71,7 @@ EOF
 # Init_Env.sh is the common function library, it must be called in every script
 # after the previous variables/functions are declared
 CBE_BASE=${CBE_BASE:-~/CBE}
-. $CBE_BASE/init_script.conf
+. $CBE_BASE/oracle/init_script.conf
 
 
 # CBE_VERBOSITY=$CBE_LEVEL_NOTIFY
