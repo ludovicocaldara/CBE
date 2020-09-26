@@ -18,12 +18,12 @@
 # CBE_MUSTBE  : If this variable is set, the script checks if the user executing the script matches to the
 #	   value of this variable. If it does not match, an error is raised and the script exits 1.
 # e.g.:
-# CBE_MUSTBE=oracle
+# CBE_MUSTBE=postgres
 
 # CBE_MUSTBEON  : If this variable is set, the script checks if the current host matches the
 #	   value of this variable. If it does not match, an error is raised and the script exits 1.
 # e.g.:
-# CBE_MUSTBEON=oracle-server
+# CBE_MUSTBEON=postgres-server
 
 # CBE_JOBUSER: if set to required, the Init script will fail if the parameters do not contain the -u with the username
 #	  or if the user cannot be infered from `who am i`
@@ -33,7 +33,7 @@
 # CBE_LOG_DIR: specify the directory that contains the logs for this script.
 #	If you want to put all the logs in the same directory, just create the custom variables file with this variable.
 # CBE_LOG_DIR=~/log
-CBE_LOG_DIR=/tmp
+CBE_LOG_DIR=${CBE_LOG_DIR:-/tmp}
 
 #######################
 # Cleanup: If any function named Cleanup is defined, it will automatically be executed
@@ -71,7 +71,7 @@ EOF
 # Init_Env.sh is the common function library, it must be called in every script
 # after the previous variables/functions are declared
 CBE_HOME=${CBE_HOME:-~/CBE}
-. $CBE_HOME/init_script.conf
+. $CBE_HOME/postgres/init_script.conf
 
 
 # CBE_VERBOSITY=$CBE_LEVEL_NOTIFY

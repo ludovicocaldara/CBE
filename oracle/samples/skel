@@ -33,7 +33,7 @@
 # CBE_LOG_DIR: specify the directory that contains the logs for this script.
 #	If you want to put all the logs in the same directory, just create the custom variables file with this variable.
 # CBE_LOG_DIR=~/log
-CBE_LOG_DIR=/tmp
+CBE_LOG_DIR=${CBE_LOG_DIR:-/tmp}
 
 #######################
 # Cleanup: If any function named Cleanup is defined, it will automatically be executed
@@ -70,8 +70,8 @@ EOF
 #######################
 # Init_Env.sh is the common function library, it must be called in every script
 # after the previous variables/functions are declared
-CBE_BASE=${CBE_BASE:-~/CBE}
-. $CBE_BASE/oracle/init_script.conf
+CBE_HOME=${CBE_HOME:-~/CBE}
+. $CBE_HOME/oracle/init_script.conf
 
 
 # CBE_VERBOSITY=$CBE_LEVEL_NOTIFY

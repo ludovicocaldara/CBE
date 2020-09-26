@@ -5,15 +5,15 @@
 ###########################
 
 
-CBE_BASE=${CBE_BASE:-~/CBE}
-if [ -f ${CBE_BASE}/oracle/variables.conf ] ; then
-	. ${CBE_BASE}/oracle/variables.conf
-	. ${CBE_BASE}/oracle/aliases.conf
-	. ${CBE_BASE}/oracle/functions.conf
+CBE_HOME=${CBE_HOME:-~/CBE}
+if [ -f ${CBE_HOME}/oracle/variables.conf ] ; then
+	. ${CBE_HOME}/oracle/variables.conf
+	. ${CBE_HOME}/oracle/aliases.conf
+	. ${CBE_HOME}/oracle/functions.conf
 
 	export PROMPT_COMMAND=F_ora_prompt
 
 else
-	echo "Cannot find the CBE_BASE with the correct files in $CBE_BASE"
+	echo "Cannot find the CBE_HOME with the correct files in $CBE_HOME"
 	false
 fi

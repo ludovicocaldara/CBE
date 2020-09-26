@@ -5,15 +5,15 @@
 ###########################
 
 
-CBE_BASE=${CBE_BASE:-~/CBE}
-if [ -f ${CBE_BASE}/variables.conf ] ; then
-	. ${CBE_BASE}/variables.conf
-	. ${CBE_BASE}/aliases.conf
-	. ${CBE_BASE}/functions.conf
+CBE_HOME=${CBE_HOME:-~/CBE}
+if [ -f ${CBE_HOME}/variables.conf ] ; then
+	. ${CBE_HOME}/variables.conf
+	. ${CBE_HOME}/aliases.conf
+	. ${CBE_HOME}/functions.conf
 
 	export PROMPT_COMMAND=F_common_prompt
 
 else
-	echo "Cannot find the CBE_BASE with the correct files in $CBE_BASE"
+	echo "Cannot find the CBE_HOME with the correct files in $CBE_HOME"
 	false
 fi

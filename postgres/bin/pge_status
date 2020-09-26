@@ -1,0 +1,68 @@
+#!/bin/bash -l
+
+################################################
+# File      : pge_status
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Show the status of all the clusters on the server
+#
+
+
+
+function Usage() {
+        cat <<EOF
+	Purpose: Show the status of the clusters on the server
+        Usage: `basename $0` [-n] [{COMMON_OPTIONS}]
+
+	Options:
+		-n	order the output by cluster name. Default is order by entry position in pge_tab
+EOF
+}
+
+CBE_HOME=${CBE_HOME:-~/CBE}
+. $CBE_HOME/postgres/init_script.conf
+
+
+OFMT="%-8s %-40s %6s %8s %6s %6b\n"
+printf "$OFMT" Instance "Data Dir" Port Version PID Status
+echo "-------- ---------------------------------------- ------ -------- ------ ------------"
+
+if [ "$1" == "-n" ] ; then
+	# order by name
+	pgelist=`pge_list -n`
+else
+	# order by pgtab entry
+	pgelist=`pge_list`
+fi
+
+for instline in $pgelist ; do
+	CBE_PG_CLUSTER=`echo $instline | awk -F: '{print $1}'`
+	PGHOME=`echo $instline  | awk -F: '{print $2}'`
+	PGDATA=`echo $instline  | awk -F: '{print $5}'`
+	PGPORT=`echo $instline  | awk -F: '{print $4}'`
+	PGVERSION=`pge_version`
+	if [ -d $PGDATA ] ; then
+		if [ $USER == "postgres" ] ; then
+			PID=`head -n 1 $PGDATA/postmaster.pid 2>/dev/null`
+		else
+			PID=`sudo -u postgres -A head -n 1 $PGDATA/postmaster.pid 2>/dev/null`
+		fi
+		if [ $? -eq 0 ] && [ -n $PID ] ; then
+			ps --pid $PID >/dev/null
+			if [ $? -eq 0 ] ; then
+				STATUS=${colgrn}UP${colrst}
+			else
+				PID=none
+				STATUS=${colred}Down${colrst}
+			fi
+		else
+			PID=none
+			STATUS=${colred}Down${colrst}
+		fi
+	else
+		PID=none
+		STATUS=Down
+	fi
+	printf "$OFMT" $CBE_PG_CLUSTER $PGDATA $PGPORT $PGVERSION $PID $STATUS
+done
+	
