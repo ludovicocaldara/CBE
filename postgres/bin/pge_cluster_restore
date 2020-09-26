@@ -1,0 +1,309 @@
+#!/bin/bash -l
+################################################
+# File      : pge_cluster_restore
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Restore the whole instance from source to destination using specified recover point in time
+#             It contains basic information about how to use the common script environment.
+
+function Usage () {
+        cat <<EOF
+
+        Purpose: Restore the specified cluster.
+
+        Usage: `basename $0` -i sourceinst [-t datetime] [-e destinst]
+
+                -i sourceinst   Use sourceinst as the source instance for the restore.
+                -t datetime     The date and time of the point in time to be used for the restore.
+                                The datetime must be in format "YYYY-MM-DD_HH24:MI:SS". E.g. "2016-02-15 15:26:00".
+EOF
+}
+
+LOCAL_PARSE_OPTIONS="i:t:"
+
+MUSTBE=postgres
+JOBUSER=required  
+
+Cleanup () {
+	if [ $1 -eq 0 ] ; then
+		# exit 0 trapped
+		# update the status in a log, table, etc. to 
+		# report success
+		EXITSTATUS="OK"
+		einfo "Restore completed successfully, cleaning up temporary restore directory."
+		edumpvar DEST_FILE_PATH
+		[ $DEST_FILE_PATH ] && [ -d $DEST_FILE_PATH ] && rm $DEST_FILE_PATH/*
+
+	else
+		# exit !0 trapped
+		# update the status in a log, table, etc. to 
+		# report the error
+		EXITSTATUS="ERREUR"
+	fi
+	# remove pipes, temporary files etc 
+	[ $TMP_WAL_FILE_LIST ] && [ -f $TMP_WAL_FILE_LIST ] && rm $TMP_WAL_FILE_LIST
+
+	edumpvar DUP_ID
+	if [ $DUP_ID ] && [ -n "$DUP_ID" ] ; then
+		einfo "Updating the table $DUP_TABLE with the relevant information."
+		PG_LOG_FILE=`ls -1tr $PGDATA/pg_log | tail -1`
+		$SQLPLUS -s /@${G_CHRONOBASE} << EOF
+		UPDATE ${DUP_TABLE} SET 
+			statut='${EXITSTATUS}', end_date=SYSDATE,
+			RUNLOG_NAME='${LOGFILE}',RUNLOG_MIME='text/plain',
+			RMANLOG_NAME='${PGDATA}/pg_log/${PG_LOG_FILE}',RMANLOG_MIME='text/plain'
+		WHERE
+			ID = ${DUP_ID};
+		commit;
+		quit
+EOF
+		F_check_warn $? "Update information into central server"
+
+        		edebug "Uploading file $LOGFILE"
+        		$PGE_BIN/support-files/upload_blob.sh -t $DUP_TABLE -c RUNLOG -i $DUP_ID -f $LOGFILE
+
+        		edebug "Uploading file $PG_LOG_FILE"
+        		$PGE_BIN/support-files/upload_blob.sh -t $DUP_TABLE -c RMANLOG -i $DUP_ID -f $PGDATA/pg_log/$PG_LOG_FILE
+
+	fi
+
+}
+
+
+. $PGE_BIN/pge_profile
+. $PGE_BIN/Init_Env.sh
+. $PGE_BIN/support-files/Init_Chronobase.sh
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		i)
+			edebug "Got parameter -i. Its value is $OPTARG"
+			SOURCEINST=$OPTARG
+			;;
+		t)
+			edebug "Got parameter -t. Its value is $OPTARG"
+			PITR=$OPTARG
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			exit 1
+			;;
+	esac
+done
+
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+if ! [ $SOURCEINST ] ; then
+	eerror "Please specify the source instance with -i parameter."
+	exit 1
+fi
+if ! [ $PITR ] ; then
+        enotify "Restore date not specified, using the most recent wal files backups."
+        PITR=`date +"%Y-%m-%d_%H:%M:%S"`
+fi
+
+F_validate_date $PITR
+F_check_exit $? "$PITR: date format check"
+
+
+Job=${Job}_${SOURCEINST}_to_${PGE_CLUSTER}_${PITR}
+
+F_Open_Pipeout
+
+enotify "Source cluster: $SOURCEINST"
+enotify "Destination cluster: $PGE_CLUSTER"
+enotify "Recover point in time: $PITR"
+
+DUP_SEQ="SEQ_DUPLICATE_ID"
+DUP_ID=`F_sequence_nextval $DUP_SEQ`
+DUP_TABLE="PGE_DUPLICATE"
+
+einfo "Duplicate ID: $DUP_ID"
+
+$SQLPLUS -s /@${G_CHRONOBASE} <<EOF
+set head off feed off
+INSERT INTO ${DUP_TABLE}  (id,run,start_date,ds,statut,refresh_date,source,dest,username)
+VALUES (${DUP_ID},'${G_DATETIME}',SYSDATE,'${SREQ}','EN COURS',TO_DATE('${PITR}','YYYY-MM-DD_HH24:MI:SS'),'${SOURCEINST}','${PGE_CLUSTER}','${JOBUSER}');
+COMMIT;
+quit
+EOF
+F_check_warn $? "Inserting information into Chronobase"
+
+
+einfo "Getting information about the base backup to be used."
+
+# get backup info from pg_backup chronobase
+BCKFULL_ROW=`$SQLPLUS -s /@${G_CHRONOBASE} <<EOF | grep "|"
+	set head off feed off echo off
+	set lines 2000 pages 0
+	WITH a AS
+	(
+		SELECT rank() over (order by b.end_time DESC) AS mostrecent,
+		b.id id,
+		d.server_name,
+		b.filename,
+		to_char(b.end_time,'YYYY-MM-DD_HH24:MI:SS') end_time,
+		b.checksum
+	FROM pg_databases_histo d
+	JOIN pg_backup b
+		ON (d.instance_name=b.pg_cluster)
+	WHERE b.pg_cluster   ='$SOURCEINST'
+		AND trunc(d.collect_date)=trunc(b.end_time)
+		AND b.end_time        <to_date('$PITR','YYYY-MM-DD HH24:MI:SS')
+		and b.status='OK'
+		and d.database_name in ('postgres','enterprisedb')
+		and b.backup_type='full'
+	)
+	SELECT id||'|'||server_name||'|'||end_time||'|'||filename FROM a WHERE mostrecent=1;
+EOF
+`
+	F_check_exit $? "Getting full base backup information"
+	edumpvar BCKFULL_ROW
+
+	DEST_FILE_PATH=$PGE_BACKUP_BASE/restore
+	[[ -d $DEST_FILE_PATH ]] || mkdir -p $DEST_FILE_PATH
+
+	BASEBCK_ID=`echo $BCKFULL_ROW | awk -F '|' '{print $1}'`
+	NWCLIENT=`echo $BCKFULL_ROW | awk -F '|' '{print $2}'`
+	BASEBCK_STARTTIME=`echo $BCKFULL_ROW | awk -F '|' '{print $3}'`
+	BASEBCK_FILENAME=`echo $BCKFULL_ROW | awk -F '|' '{print $4}'`
+
+	enotify "Base Backup File: $BASEBCK_FILENAME"
+	if [ -f $BASEBCK_FILENAME ] ; then
+		enotify "Base backup file already exist on local server. No need to restore it."
+		NEW_FILENAME=$BASEBCK_FILENAME
+	else
+		# in all other cases we need to restore from networker
+                CMD="recover -a -f -c ${NWCLIENT} -d ${DEST_FILE_PATH} $BASEBCK_FILENAME"
+                enotify "Recover command: $CMD"
+                eval $CMD
+                F_check_exit $? "Restoring from networker"
+		NEW_FILENAME=$DEST_FILE_PATH/`basename $BASEBCK_FILENAME`
+		[[ -f $NEW_FILENAME ]]
+                F_check_exit $? "Check of restored file"
+        fi
+
+	
+einfo "Getting information about the wal files needed for the recovery."
+
+BCKWAL_ROWS=`$SQLPLUS -s /@${G_CHRONOBASE} <<EOF | grep "|"
+	set head off feed off echo off
+	set lines 2000 pages 0
+	-- get first wal backup after PITR and the wal between base backup and restore date
+	WITH a AS (
+	  SELECT rank() over (order by b.start_time ASC) AS nextone,
+	    b.id, d.server_name, b.filename,
+	    to_char(b.start_time,'YYYY-MM-DD_HH24:MI:SS') start_time,
+	    to_char(b.end_time,'YYYY-MM-DD_HH24:MI:SS') end_time,
+	    start_xlog, end_xlog,
+	    b.checksum
+	  FROM pg_databases_histo d
+	  JOIN pg_backup b ON (d.instance_name=b.pg_cluster)
+	  WHERE b.pg_cluster   ='$SOURCEINST'
+	  AND trunc(d.collect_date)=trunc(b.end_time)
+	  AND b.start_time        >=to_date('$PITR','YYYY-MM-DD HH24:MI:SS')
+	  and b.status='OK' and d.database_name in ('postgres','enterprisedb')
+	  and b.backup_type='wal'
+	)
+	SELECT id||'|'||start_time||'|'||end_time||'|'||filename||'|'||start_xlog||'|'||end_xlog FROM a WHERE nextone=1
+	union all
+	select id||'|'||to_char(start_time,'YYYY-MM-DD_HH24:MI:SS')||'|'||
+	  to_char(end_time,'YYYY-MM-DD_HH24:MI:SS')||'|'||filename||'|'||start_xlog||'|'||end_xlog
+	from pg_backup
+	  where pg_cluster='$SOURCEINST' and backup_type='wal'
+	  and start_time between to_date('${BASEBCK_STARTTIME}','YYYY-MM-DD_HH24:MI:SS') and to_date('$PITR','YYYY-MM-DD HH24:MI:SS');
+EOF
+`
+	F_check_exit $? "Getting wal backup information"
+	edumpvar BCKWAL_ROWS
+
+OLDIFS=$IFS
+IFS="
+"
+
+BCKIDS=""
+for BCKWAL in $BCKWAL_ROWS ; do
+	BCKIDS=$BCKIDS`echo $BCKWAL | awk -F '|' '{print $1}'`","
+done
+BCKIDS=`echo $BCKIDS | sed  s/,$//`
+edumpvar BCKIDS
+
+BCKWAL_FILES=`$SQLPLUS -s /@${G_CHRONOBASE} <<EOF | grep "|"
+	set head off feed off echo off
+	set lines 2000 pages 0
+	select filename||'|'||filepath||'|'||filedate||'|'||checksum from pg_backup_wal where bsid in ($BCKIDS) order by filedate asc;
+EOF
+`
+
+# creating temp file for files to be restored
+TMP_WAL_FILE_LIST=`mktemp`
+cat /dev/null > $TMP_WAL_FILE_LIST
+
+for BCKWAL_FILE in $BCKWAL_FILES ; do
+	WAL_FILEPATH=`echo $BCKWAL_FILE | awk -F '|' '{print $2}'`
+	WAL_FILENAME=`echo $BCKWAL_FILE | awk -F '|' '{print $1}'`
+	WAL_FILE_RESTORED=$DEST_FILE_PATH/$WAL_FILENAME
+	if [ -f $WAL_FILEPATH ] ; then
+		# if the file is already there, I hard link it to the restore directory
+		# so it will be safe to delete the link or the original file without impacting each other
+		# but also without wasting space
+		einfo "File $WAL_FILEPATH is already there, linking it to the restore directory."
+		ln $WAL_FILEPATH $WAL_FILE_RESTORED
+	else
+		if [ -f $WAL_FILE_RESTORED ] ; then
+			einfo "File $WAL_FILE_RESTORED has been restored by a previous run. Skipping."
+		else
+			einfo "File $WAL_FILEPATH not found, adding it to the list of files to be restored from Networker."
+			echo $WAL_FILEPATH >> $TMP_WAL_FILE_LIST
+		fi
+	fi
+done
+
+if [ `wc -l $TMP_WAL_FILE_LIST | awk '{print $1}'` -gt 0 ] ; then
+	## there are files that need to be restored
+	einfo "Some WAL files need to be restored. Now restoring using Networker."
+	cat $TMP_WAL_FILE_LIST
+	CMD="recover -a -f -c ${NWCLIENT} -d ${DEST_FILE_PATH} -I $TMP_WAL_FILE_LIST"
+	enotify "Recover command: $CMD"
+	eval $CMD
+	F_check_exit $? "Restoring from networker"
+fi
+
+# if we are here, the base backup and the required wal files have been restored successfully
+# we can safely stop the instance that we want to restore (if it's up)
+PID=`head -n 1 $PGDATA/postmaster.pid 2>/dev/null`
+if [ $? -eq 0 ] && [ -n $PID ] ; then
+	ps --pid $PID >/dev/null
+	if [ $? -eq 0 ] ; then
+		$PGE_BIN/pge_ctl -a stop
+	fi
+fi
+
+cp -p $PGDATA/postgresql.conf $PGE_ADMIN && cp -p $PGDATA/pg_hba.conf $PGE_ADMIN && cp -p $PGDATA/pg_ident.conf $PGE_ADMIN
+F_check_exit $? "Saving configuration files"
+rm -rf $PGDATA/*
+F_check_exit $? "Empyting $PGDATA"
+
+tar xvzf $NEW_FILENAME -C $PGDATA 
+F_check_exit $? "Untaring the base backup"
+cp -p $PGE_ADMIN/postgresql.conf $PGDATA
+cp -p $PGE_ADMIN/pg_hba.conf  $PGDATA
+cp -p $PGE_ADMIN/pg_ident.conf $PGDATA
+
+einfo "Recovering the database"
+cat <<EOF > $PGDATA/recovery.conf
+restore_command='cp ${DEST_FILE_PATH}/%f %p'
+recovery_target_time = '${PITR}'
+EOF
+
+$PGE_BIN/pge_ctl -a start
+F_check_exit $? "Recovery"
+
+F_Close_Pipeout
+
+exit 0

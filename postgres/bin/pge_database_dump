@@ -1,0 +1,305 @@
+#!/bin/bash -l
+################################################
+# File      : pge_database_dump
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Dump the specific database: either one, many (separated by commas) or all (default)
+#             
+
+function Usage () {
+	cat <<EOF
+	Purpose: Dump one or more PostgreSQL databases. If all are dumped, one dump per database is created.
+		Independently from the database, an additional dump is taken for the global objects (roles, etc)
+	Usage: `basename $0` [-d NAME] [-f {c|t}] [{Common Options}]
+		-d NAME			Dump the specified database. If omitted, all databases are assumed.
+					More databases can be specified, separated by comma, without spaces.
+		-f c|t			format for the dump file: c=custom t=text (c is the default for this script)
+		-q			Daily export. If specified, all other options are ignored, all databases are backed up.
+EOF
+}
+
+function Cleanup () {
+	if [ $1 -ne 0 ] ; then
+		# function Cleanup must update the status of the last export in case of errors
+		[ $EXPORT_ID ] && Update_Exp_Status
+	fi
+}
+
+LOCAL_PARSE_OPTIONS="d:f:q"
+MUSTBE=postgres
+JOBUSER=${JOBUSER:-required}
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+function Update_Exp_Status () {
+	edebug "Updating the status of export $EXPORT_ID to $DUMP_STATUS"
+	$PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF >/dev/null
+	\lo_import '$DUMPINFO'
+	\set dumplo :LASTOID
+	\lo_import '$LOGFILE'
+	\set runlo :LASTOID
+	UPDATE $EXP_TABLE_NAME SET
+	   status        = '$DUMP_STATUS'
+	  ,end_date      = to_timestamp('${G_DATETIME}','YYYYMMDD_HH24MISS')
+	  ,run_log_path   = '${LOGFILE}'
+	  ,dumpfile_path = '$DUMPFILE'
+	  ,dump_log_path = '$DUMPINFO'
+	  ,run_log       = encode(lo_get(:runlo),'escape')
+	  ,dump_log      = encode(lo_get(:dumplo),'escape')
+	WHERE id        = ${EXPORT_ID};
+	\lo_unlink :dumplo
+	\lo_unlink :runlo
+	\q
+EOF
+}
+
+# table name and sequence name for exports
+EXP_TABLE_NAME="pge_dumps"
+EXP_SEQ_NAME="pge_dumps_id_seq"
+
+
+DAILY_DUMP="no"
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		q)
+			edebug "Got parameter -q."
+			DAILY_DUMP="yes"
+			;;
+		d)
+			edebug "Got parameter -d. Its value is $OPTARG"
+			DATABASES_TBD=$OPTARG
+			;;
+		f)
+			edebug "Got parameter -f. Its value is $OPTARG"
+			DUMP_FORMAT=$OPTARG
+			if [ $DUMP_FORMAT != "c" ] && [ $DUMP_FORMAT != "t" ] ; then
+				eerror "Invalid option specified for -f."
+				Usage
+				F_common_usage
+				exit 1
+			fi
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			Usage
+			F_common_usage
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			Usage
+			F_common_usage
+			exit 1
+			;;
+	esac
+done
+
+# if running a daily dump, all parameters are fixed
+if [ $DAILY_DUMP == "yes" ] ; then
+	enotify "Running daily dump, ignoring all other parameters"
+	unset DATABASES_TBD
+	DUMP_FORMAT="c"
+
+fi
+
+## an environment must be set either with pgenv or with the -e parameter
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+## parameters have already be checked for validity.
+## Now I just need to set defaults for those who have not been passed
+DUMP_FORMAT=${DUMP_FORMAT:-"c"}
+enotify "Dump Format: $DUMP_FORMAT"
+
+if ! [ $PGE_DUMP_DEST ] ; then
+	if ! [ -d $PGE_BACKUP_COMMON ] ; then
+		eerror "Backup base directory $PGE_BACKUP_COMMON does not exist."
+		exit 1
+	else
+		PGE_DUMP_DEST=$PGE_BACKUP_COMMON/$PGE_CLUSTER/dump
+	fi
+fi
+einfo "Dump directory: $PGE_DUMP_DEST"
+[ -d $PGE_DUMP_DEST ] || mkdir -p -m 2750 $PGE_DUMP_DEST
+F_check_exit $? "Check/creation of dump directory"
+
+
+## if no database specified, get the list of all db and export all databases
+if ! [ $DATABASES_TBD ] ; then
+	DATABASES_ALL="yes"
+	DATABASES_TBD=`db_list | awk 'BEGIN{LIST=""}{LIST=sprintf ("%s,%s", LIST, $1)}END{print substr(LIST,2)}'`
+	if ! [ $DATABASES_TBD ] ; then
+		eerror "Cannot get the list of databases."
+		exit 1
+	fi
+	DATABASES_TBD_=`echo $DATABASES_TBD | sed -e "s/,/_/g"`
+	Job=${Job}_${PGE_CLUSTER}_all
+else
+	DATABASES_ALL="no"
+	DATABASES_TBD_=`echo $DATABASES_TBD | sed -e "s/,/_/g"`
+	Job=${Job}_${PGE_CLUSTER}_${DATABASES_TBD_}
+fi
+
+F_Open_Pipeout
+
+edebug "All Databases: $DATABASES_ALL"
+einfo "Databases to be done: $DATABASES_TBD"
+
+
+# databases are separated by commas, need to change IFS temporarily
+OLFIFS=$IFS
+IFS=","
+
+## we trace all export ids to update the final runlog and networkerlog for each one...
+EXPORT_IDS=""
+
+# DUMP_ERRORS contiendra le nombre de dumps qui ont failli pour avoir le statut final
+DUMP_ERRORS=0
+for DATABASE in $DATABASES_TBD ; do
+	enotify "Starting dump of database $DATABASE"
+
+	if [ $DAILY_DUMP == "yes" ] ; then
+		DUMPFILE=$PGE_DUMP_DEST/dump_daily_db_${PGE_CLUSTER}_${DUMP_FORMAT}_${DATABASE}_${G_DATE}.dump
+		DUMPINFO=$PGE_DUMP_DEST/dump_daily_db_${PGE_CLUSTER}_${DUMP_FORMAT}_${DATABASE}_${G_DATE}.txt
+	else
+		DUMPFILE=$PGE_DUMP_DEST/dump_db_${PGE_CLUSTER}_${DUMP_FORMAT}_${DATABASE}_${G_DATETIME}.dump
+		DUMPINFO=$PGE_DUMP_DEST/dump_db_${PGE_CLUSTER}_${DUMP_FORMAT}_${DATABASE}_${G_DATETIME}.txt
+	fi
+
+	EXPORT_ID=`F_sequence_nextval $EXP_SEQ_NAME`
+	F_check_exit $? "Getting sequence nextval for $DATABASE dump"
+
+	EXPORT_IDS="$EXPORT_IDS $EXPORT_ID"
+	edebug "EXPORT_IDS=$EXPORT_IDS"
+
+	$PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF >/dev/null
+	INSERT INTO $EXP_TABLE_NAME (
+		id
+		,pg_cluster
+		,database_name
+		,status
+		,start_date
+		,username
+		,sreq
+	) VALUES (
+		 ${EXPORT_ID}
+		,'${PGE_CLUSTER}'
+		,'${DATABASE}'
+		,'running'
+		,current_timestamp
+		,'${JOBUSER}'
+		,'${SREQ}'
+	);
+	\q
+EOF
+
+	## dump_status set to error by default. If something goes wrong, the CleanUp function will update the table with this status.
+	DUMP_STATUS="error"
+
+	## here's the real dump command
+	CMD="$PGHOME/bin/pg_dump -U $PGE_SUPER --format=$DUMP_FORMAT --file=$DUMPFILE $DATABASE" 
+	enotify "Dump file name: $DUMPFILE"
+	echo $CMD > $DUMPINFO
+	einfo "Dump command: $CMD" 
+	eval $CMD
+	DUMP_EXITCODE=$?
+	F_check_warn $DUMP_EXITCODE "Dump of database $DATABASE"
+	echo "Exit Code: $DUMP_EXITCODE" >> $DUMPINFO
+	if [ $DUMP_EXITCODE -ne 0 ] ; then
+		DUMP_ERRORS=$(($DUMP_ERRORS+1))
+		# file inconsistent due to backup error. Cleanup.
+		[ -f $DUMPFILE ] && rm $DUMPFILE
+	else
+		DUMPFILE_MD5=`md5sum $DUMPFILE`
+		echo "Dump md5sum:" >> $DUMPINFO
+		echo $DUMPFILE_MD5 >> $DUMPINFO
+		if [ $DUMP_FORMAT="c" ] ; then
+			echo "Dump content:" >> $DUMPINFO
+			$PGHOME/bin/pg_restore -l $DUMPFILE >> $DUMPINFO
+			echo "Content exit status: $?" >> $DUMPINFO
+		fi
+		DUMP_STATUS="ok"
+		### continue here 
+	fi
+	Update_Exp_Status
+	
+done ## end of looping through databases
+
+IFS=$OLDIFS
+
+
+## dump of global options independently from the database name, number or format
+DATABASE="_global_"
+if [ $DAILY_DUMP == "yes" ] ; then
+	DUMPFILE=$PGE_DUMP_DEST/dump_daily_global_${PGE_CLUSTER}_c_${G_DATE}.dump
+	DUMPINFO=$DUMPFILE
+else
+	DUMPFILE=$PGE_DUMP_DEST/dump_global_${PGE_CLUSTER}_c_${G_DATETIME}.dump
+	DUMPINFO=$DUMPFILE
+fi
+
+EXPORT_ID=`F_sequence_nextval $EXP_SEQ_NAME`
+F_check_exit $? "Getting sequence nextval for $DATABASE dump"
+
+EXPORT_IDS="$EXPORT_IDS $EXPORT_ID"
+edebug "EXPORT_IDS=$EXPORT_IDS"
+
+$PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} << EOF >/dev/null
+	INSERT INTO $EXP_TABLE_NAME (
+		id
+		,pg_cluster
+		,database_name
+		,status
+		,start_date
+		,username
+		,sreq
+	 ) VALUES (
+		${EXPORT_ID}
+		,'${PGE_CLUSTER}'
+		,'_global_'
+		,'running'
+		,current_timestamp
+		,'${JOBUSER}'
+		,'${SREQ}'
+	);
+	\q
+EOF
+
+## dump_status set to error by default. If something goes wrong, the CleanUp function will update the table with this status.
+DUMP_STATUS="error"
+
+CMD="$PGHOME/bin/pg_dumpall -U $PGE_SUPER -g --file=$DUMPFILE"
+einfo "Dump command: $CMD" 
+eval $CMD
+DUMP_EXITCODE=$?
+F_check_warn $DUMP_EXITCODE "Dump of global components"
+if [ $DUMP_EXITCODE -ne 0 ] ; then
+	DUMP_ERRORS=$(($DUMP_ERRORS+1))
+	# file inconsistend due to backup error. Cleanup.
+	[ -f $DUMPFILE ] && rm $DUMPFILE
+else
+	DUMPFILE_MD5=`md5sum $DUMPFILE`
+	echo "Dump md5sum:" >> $DUMPINFO
+	echo $DUMPFILE_MD5 >> $DUMPINFO
+	if [ $DUMP_FORMAT="c" ] ; then
+		echo "Dump content:" >> $DUMPINFO
+		$PGHOME/bin/pg_restore -l $DUMPFILE >> $DUMPINFO
+			echo "Content exit status: $?" >> $DUMPINFO
+	fi
+	DUMP_STATUS="ok"
+fi
+
+Update_Exp_Status
+F_check_exit $DUMP_ERRORS "Overall dump procedure"
+
+#OLDIFS=$IFS
+#IFS=" "
+#for EXPORT_ID in $EXPORT_IDS ; do
+#	einfo "Uploading file $LOGFILE for id $EXPORT_ID"
+#done
+#IFS=$OLDIFS
+
+F_Close_Pipeout
+
+exit 0

@@ -1,0 +1,198 @@
+#!/bin/bash -l
+################################################
+# File      : pge_build
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Base script to build PostgreSQL from source and install it
+# 
+
+LOCAL_PARSE_OPTIONS="b:n:l"
+
+MUSTBE=postgres
+
+#######################
+# Cleanup: If any function named Cleanup is defined, it will automatically be executed
+# with the trap EXIT command. 
+Cleanup () {
+	if [ $1 -eq 0 ] ; then
+		# remove source and the build directory only if the execution succeeded
+		[ -f ${L_build_path}.tar.bz2 ] && rm ${L_build_path}.tar.bz2
+		[ -d $L_build_path ] && rm -rf $L_build_path
+		exit 0
+	else
+		exit 1
+	fi
+}
+
+
+Usage () {
+	cat <<EOF
+ 	Usage: `basename $0` -b VERSION [ -p PATH ] | [-l] [{Common Options}] 
+
+	Options:
+		-b VERSION : download and build PostgreSQL version VERSION under $CBE_PG_SOURCE_BASE. The build is then installed into the path specified by -p.
+		-p PATH    : when installing, change the destination directory from the default $CBE_PG_INSTALL_BASE/postgresql-{VERSION} to something else.
+		-l	   : Just list the available source versions
+
+
+EOF
+}
+
+F_version_list() {
+curl -s http://ftp.postgresql.org/pub/source/ | grep Directory | grep 'class="n"' | awk -F'/">v' '{print $2}' | awk -F'<' '{print $1}'
+}
+
+CBE_HOME=${CBE_HOME:-~/CBE}
+. $CBE_HOME/postgres/init_script.conf
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		b)
+			L_src_version=$OPTARG
+			;;
+		p)
+			L_install_path=$OPTARG
+			;;
+		l)
+			F_version_list
+			exit 0
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			exit 1
+			;;
+	esac
+done
+
+if ! [ $L_src_version ] ; then
+	eerror "Version not specified."
+	Usage
+	F_common_usage
+	exit 1
+fi
+
+[ -d $CBE_PG_SOURCE_BASE ] || mkdir -p $CBE_PG_SOURCE_BASE
+[ -d $CBE_PG_INSTALL_BASE ] || mkdir -p $CBE_PG_INSTALL_BASE
+[ $L_install_path ] || L_install_path=$CBE_PG_INSTALL_BASE/postgresql-${L_src_version}
+
+Job=${Job}_${L_src_version}
+
+F_start_logging
+
+L_build_path=$CBE_PG_SOURCE_BASE/postgresql-${L_src_version}
+
+edumpvar L_build_path L_src_version L_install_path
+
+# promptly remove the build path and the tarball if they already exists
+[ -d $L_build_path ] && rm -rf $L_build_path
+[ -f ${L_build_path}.tar.bz2 ] && rm ${L_build_path}.tar.bz2
+
+
+# exit if the install path exists already
+if [ -d $L_install_path ] ; then
+	eerror "Destination directory $L_install_path already exists"
+	exit 1
+fi
+
+# path to dowload the tarball from
+L_src_url=http://ftp.postgresql.org/pub/source/v${L_src_version}/postgresql-${L_src_version}.tar.bz2
+edumpvar L_src_url
+
+
+# download the tarball
+[ -f ${L_build_path}.tar.bz2 ] && mv ${L_build_path}.tar.bz2 ${L_build_path}.tar.bz2.OLD
+curl -o ${L_build_path}.tar.bz2 $L_src_url
+F_check_exit $? "Download of the source"
+
+# enter the source base and unzip the tarball
+pushd $CBE_PG_SOURCE_BASE
+tar xvjf ${L_build_path}.tar.bz2
+F_check_exit $? "Unpacking the source"
+
+# enter the postrgesql source directory
+pushd $L_build_path
+
+# configure and make world!
+# the list of with is to make sure that some common features are compiled
+# the package list for yum-bases distros include:
+# basic for postgresql:
+#
+#     sudo yum install -y bison-devel readline-devel zlib-devel wget make gcc git 
+#
+# additional for a compile without warnings:
+#
+#    sudo yum install -y bison flex
+#
+# optional for all the "-with" parameters:
+#
+#   sudo yum install -y openssl-devel openldap-devel pam-devel libxml2-devel libxslt libxslt-devel libuuid-devel systemd-devel python-devel
+./configure --prefix=$L_install_path --with-python --with-pam --with-ldap --with-openssl --with-uuid=e2fs --with-systemd  --with-libxml  --with-selinux --with-libxslt --with-gnu-ld && make world && make check && make install-world
+F_check_exit $? "Compiling and installing PostgreSQL"
+
+popd # exit the postgresql dir and go back in src
+
+# TO CHECK... THE PROCESS TO BUILD ALL THESE EXTENSIONS
+export CBE_PGHOME=$L_install_path
+export LD_LIBRARY_PATH=$BASE_LD_LIBRARY_PATH:$CBE_PGHOME/lib/postgresql:$CBE_PGHOME/lib;
+export PATH=$CBE_PGHOME/bin:$CBE_PG_BIN:$CUSTOM_PATH;
+
+
+
+pushd /u01/app/postgres/src/
+rm -rf pgaudit/
+git clone https://github.com/pgaudit/pgaudit.git
+pushd pgaudit/
+# git checkout REL_11_STABLE
+# REL9_5_STABLE
+# REL9_6_STABLE
+# REL_10_STABLE
+# REL_11_STABLE
+
+git checkout master
+make install USE_PGXS=1
+popd
+
+
+rm -rf pg_repack
+git clone git://github.com/reorg/pg_repack.git
+pushd pg_repack
+make && make install
+popd
+
+rm -rf pg_stat_kcache
+git clone https://github.com/powa-team/pg_stat_kcache.git
+pushd pg_stat_kcache
+make && make install
+popd
+
+
+rm -rf pg_qualstats
+git clone https://github.com/powa-team/pg_qualstats.git
+pushd pg_qualstats
+make && make install
+popd
+
+rm -rf hypopg
+git clone https://github.com/HypoPG/hypopg.git
+pushd hypopg
+git checkout REL1_STABLE
+make && make install
+popd
+
+rm -rf pgsentinel
+git clone https://github.com/pgsentinel/pgsentinel.git
+pushd pgsentinel/src/
+make
+make install
+popd
+ 
+popd
+
+
+F_stop_logging
+
+exit 0

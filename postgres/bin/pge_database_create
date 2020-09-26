@@ -1,0 +1,233 @@
+#!/bin/bash -l
+################################################
+# File      : pge_database_create
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Create the specific database.
+#             
+
+function Usage () {
+	cat <<EOF
+	Purpose: Create the specified database, the technical accounts and set the correct permissions.
+	Usage: `basename $0` -d NAME [{Common Options}]
+		-d NAME		Create database NAME.
+		-c LC_COLLATE	Create database with the specified LC_COLLATE. This will force the creation from template0.
+		-t LC_CTYPE	Create database with the specified LC_CTYPE. This will force the creation from template0.
+EOF
+}
+
+function Cleanup () {
+	if [ "$LOG_REPO" == "YES" ] ; then
+		TAB_NAME='pge_database_create'
+		SEQ_NAME='pge_database_create_id_seq'
+
+		edumpvar PGPASSFILE
+		SEQ_ID=`F_sequence_nextval $SEQ_NAME`
+	        F_check_exit $? "Getting sequence nextval, problems with the database"
+
+		if [ $1 -ne 0 ] ; then
+			STATUS='error'
+		else
+			STATUS='ok'
+		fi
+        	$PGHOME/bin/psql ${PGE_REPO_CONN} << EOF
+		\lo_import '$LOGFILE'
+		\set lo :LASTOID
+		INSERT INTO $TAB_NAME ( id
+		 	, start_date
+			, end_date
+			, status
+			, database_name
+			, lc_ctype
+			, lc_collate
+			, pg_cluster
+			, server_name
+			, sreq
+			, username
+			, log
+		) VALUES ( $SEQ_ID
+		 	, to_timestamp('${G_DATETIME}','YYYYMMDD_HH24MISS')
+			, current_timestamp
+			, '$STATUS'
+			, '${DATABASE_NAME}'
+			, '$LCTYPE'
+			, '$LCCOLLATE'
+			, '${PGE_CLUSTER}'
+			, '$HOSTNAME'
+			, '${SREQ}'
+			, '${JOBUSER}'
+			, encode(lo_get(:lo),'escape')
+		);
+		\lo_unlink :lo
+        	\q
+EOF
+	        F_check_exit $? "inserting the information into the database"
+	fi
+}
+
+LOCAL_PARSE_OPTIONS="d:c:t:"
+MUSTBE=postgres
+JOBUSER=${JOBUSER:-required}
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		d)
+			edebug "Got parameter -d. Its value is $OPTARG"
+			DATABASE_NAME=$OPTARG
+			;;
+		c)
+			edebug "Got parameter -c. Its value is $OPTARG"
+			LCCOLLATE=$OPTARG
+			;;
+		t)
+			edebug "Got parameter -t. Its value is $OPTARG"
+			LCTYPE=$OPTARG
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			Usage
+			F_common_usage
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			Usage
+			F_common_usage
+			exit 1
+			;;
+	esac
+done
+
+## an environment must be set either with pgenv or with the -e parameter
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+if ! [ $DATABASE_NAME ] ; then
+	eerror "Please specify a database name with the option -d NAME."
+	exit 1
+fi
+
+LOG_REPO="YES"
+
+Job=${Job}_${PGE_CLUSTER}_${DATABASE_NAME}
+
+F_Open_Pipeout
+
+TEMPLATE0=""
+[ $LCTYPE ] || [ $LCCOLLATE ] && TEMPLATE0="TEMPLATE=template0"
+LCTYPE=${LCTYPE:-en_US.UTF8}
+LCCOLLATE=${LCCOLLATE:-en_US.UTF8}
+edebug TEMPLATE0 LCTYPE LCCOLLATE
+
+einfo "New database name: $DATABASE_NAME"
+
+enotify "Creating the database $DATABASE_NAME"
+$PGHOME/bin/psql -e -U $PGE_SUPER postgres <<EOF
+	\set ON_ERROR_STOP true
+	create database ${DATABASE_NAME} ${LCTYPE:+LC_CTYPE='${LCTYPE}'} ${LCCOLLATE:+LC_COLLATE='${LCCOLLATE}'} $TEMPLATE0;
+EOF
+F_check_exit $? "Create database $DATABASE_NAME "
+
+enotify "Creating the technical users and fixing the privileges"
+
+OWNER_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='${DATABASE_NAME}_owner';"`
+USER_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='${DATABASE_NAME}_user';"`
+READ_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='${DATABASE_NAME}_read';"`
+
+PASS_OWNER=`F_random_password 32`
+PASS_USER=`F_random_password 32`
+PASS_READ=`F_random_password 32`
+$PGHOME/bin/psql -e -U $PGE_SUPER $DATABASE_NAME <<EOF
+	\set ON_ERROR_STOP true
+	revoke all privileges on schema public from public;
+	-- create base users
+	\set ECHO errors
+	DO
+	\$body\$
+	BEGIN
+	IF NOT EXISTS (SELECT * FROM   pg_catalog.pg_user WHERE  usename = '${DATABASE_NAME}_owner') THEN
+		create role ${DATABASE_NAME}_owner login password '${PASS_OWNER}';
+	END IF;
+	IF NOT EXISTS (SELECT * FROM   pg_catalog.pg_user WHERE  usename = '${DATABASE_NAME}_user') THEN
+	create role ${DATABASE_NAME}_user login password '${PASS_USER}';
+	END IF;
+	IF NOT EXISTS (SELECT * FROM   pg_catalog.pg_user WHERE  usename = '${DATABASE_NAME}_read') THEN
+	create role ${DATABASE_NAME}_read login password '${PASS_READ}';
+	END IF;
+	END
+	\$body\$;
+	\set ECHO queries
+	-- give create rights to the owner
+	grant all privileges on schema public to ${DATABASE_NAME}_owner;
+	-- set the correct owner
+	alter database ${DATABASE_NAME} owner to ${DATABASE_NAME}_owner;
+	-- give usage rights to the read and read write users
+	grant usage on schema public to ${DATABASE_NAME}_user;
+	grant usage on schema public to ${DATABASE_NAME}_read;
+	-- give correct privileges to read and read write users for objects created in the public schema
+	set role=${DATABASE_NAME}_owner;
+	-- read just have select on tables and sequences
+	alter default privileges in schema public grant select on tables to ${DATABASE_NAME}_read;
+	alter default privileges in schema public grant select on sequences to ${DATABASE_NAME}_read;
+	-- user have CRUD on on tables, update on sequences, execute on functions
+	alter default privileges in schema public grant select, insert, update, delete, truncate on tables to ${DATABASE_NAME}_user;
+	alter default privileges in schema public grant usage, select, update on sequences to ${DATABASE_NAME}_user;
+	alter default privileges in schema public grant execute on functions to ${DATABASE_NAME}_user;
+EOF
+F_check_exit $? "Create users and fix permissions on $DATABASE_NAME"
+
+
+
+if [ "$OWNER_EXISTS" == "EXISTS" ] ; then
+	PASS_OWNER="The account already exists, the password did not change."
+	einfo "The account ${DATABASE_NAME}_owner already exists, the password did not change."
+fi
+if [ "$USER_EXISTS" == "EXISTS" ] ; then
+	PASS_USER="The account already exists, the password did not change."
+	einfo "The account ${DATABASE_NAME}_user already exists, the password did not change."
+fi
+if [ "$READ_EXISTS" == "EXISTS" ] ; then
+	PASS_READ="The account already exists, the password did not change."
+	einfo "The account ${DATABASE_NAME}_read already exists, the password did not change."
+fi
+
+F_Close_Pipeout
+
+edebug "Connection variables:"
+edebug "PGHOST=`hostname`"
+edebug "PGPORT=$PGPORT"
+edebug "PGE_CLUSTER=$PGE_CLUSTER"
+edebug "DATABASE=$DATABASE_NAME"
+edebug "OWNER=${DATABASE_NAME}_owner"
+edebug "OWNER_PASS=${PASS_OWNER}"
+edebug "USER=${DATABASE_NAME}_user"
+edebug "USER_PASS=${PASS_USER}"
+edebug "READ=${DATABASE_NAME}_read"
+edebug "READ_PASS=${PASS_READ}"
+
+(cat <<EOF
+Creation of database $DATABASE_NAME completed successfully on instance $PGE_CLUSTER.
+
+Please forward this email to the right people.
+
+Connection variables:
+PGHOST    =`hostname`
+PGPORT    = $PGPORT
+PGE_CLUSTER= $PGE_CLUSTER
+DATABASE  = $DATABASE_NAME
+OWNER     = ${DATABASE_NAME}_owner
+OWNER_PASS= ${PASS_OWNER}
+USER      = ${DATABASE_NAME}_user
+USER_PASS = ${PASS_USER}
+READ      = ${DATABASE_NAME}_read
+READ_PASS = ${PASS_READ}
+
+EOF
+) | mailx -s "Database $DATABASE_NAME created on instance $PGE_CLUSTER" $PGE_MAILINGLIST
+
+
+exit 0

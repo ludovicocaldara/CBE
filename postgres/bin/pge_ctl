@@ -1,0 +1,94 @@
+#!/bin/bash -l
+################################################
+# File      : pge_ctl
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Wrapper for pg_ctl script. It must run as postgres user.
+#		It redirects the standard output of postgres in $PGOUTPUT
+#		(as set by the environment script)
+#		It logs every execution into the traces directory (as all other scripts)
+#
+
+function Usage() {
+	cat <<EOF
+	Purpose: Wrapper for pg_ctl script. It must run as postgres user.
+	Usage: `basename $0` -a {stop|start|restart|reload|status}  [{Common Options}]
+		-a	Action to run on the specified environment.
+EOF
+}
+
+## -a <action>
+LOCAL_PARSE_OPTIONS="a:"
+MUSTBE=postgres
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+### check if environment variables for postgreSQL are set and exit if not.
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+        case $opt in
+                a)
+                        einfo "Action requested: $OPTARG"
+			PG_CTL_ACTION=$OPTARG
+                        ;;
+                \?)
+                        eerror "Invalid option: -$OPTARG"
+                        exit 1
+                        ;;
+                :)
+                        eerror "Option -$OPTARG requires an argument."
+                        exit 1
+                        ;;
+        esac
+done
+
+if ! [ $PG_CTL_ACTION ] ; then
+	eerror "Please specify an action with the option -a."
+	exit 1
+fi
+
+Job=${Job}_${PGE_CLUSTER}_${PG_CTL_ACTION}
+edebug New Job name: $Job
+
+F_Open_Pipeout
+case $PG_CTL_ACTION in
+	start)
+		# start -w -l logfile (wait and append to logfile)
+		einfo "Start requested".
+		[ -d `dirname $PGOUTPUT` ] || mkdir -p -m 770 `dirname $PGOUTPUT`
+		$PGHOME/bin/pg_ctl start -w -o "-p $PGPORT" -D $PGDATA -l $PGOUTPUT
+		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
+		;;
+	stop)
+		# stop -m fast
+		einfo "Stop requested".
+		$PGHOME/bin/pg_ctl stop -m fast
+		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
+		;;
+	restart)
+		# restart -w -m fast 
+		einfo "Restart requested".
+		$PGHOME/bin/pg_ctl restart -w -m fast
+		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
+		;;
+	reload)
+		# reload 
+		einfo "Reload requested".
+		$PGHOME/bin/pg_ctl reload
+		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
+		;;
+	status)
+		# status
+		einfo "Status requested".
+		$PGHOME/bin/pg_ctl status
+		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
+		;;
+	*)
+		eerror "Invalid action: $PG_CTL_ACTION"
+		exit 1
+		;;
+esac
+F_Close_Pipeout

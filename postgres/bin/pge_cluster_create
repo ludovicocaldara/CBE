@@ -1,0 +1,128 @@
+#!/bin/bash -l
+
+################################################
+# File      : pge_cluster_create
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Create the cluster with initdb according to pgtab
+#
+
+
+MUSTBE=postgres
+function Usage() {
+	cat <<EOF
+	Usage: `basename $0` [{COMMON_OPTIONS}]
+		Requirements: please add the PostgreSQL environment to PGE_TAB before running this script.
+EOF
+}
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+PWFILE=$PGE_BIN/../.pgpwfile
+
+### check if environment variables for postgreSQL are set and exit if not.
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+
+if ! [ -f $PWFILE ] ; then
+	eerror "Password file not found. Please create it under $PWFILE."
+	exit 1
+fi
+
+Job=${Job}_${PGE_CLUSTER}
+edebug New Job name: $Job
+
+F_Open_Pipeout
+
+if [ `pge_version |cut -f1 -d.` -ge 10 ] ; then
+  # version 10 or later
+  WALPARAM="--waldir"
+else
+  # version 9 or lower
+  WALPARAM="--xlogdir"
+fi
+
+einfo "All variables set. Starting the cluster creation with the command:"
+enotify $PGHOME/bin/initdb --auth=md5 --auth-host=md5 --auth-local=trust --pgdata=$PGDATA --encoding=UTF8 --locale=en_US.UTF8 --pwfile=$PWFILE ${WALPARAM}=$PGWAL --data-checksums
+
+## running the real initdb
+$PGHOME/bin/initdb --auth=md5 --auth-host=md5 --auth-local=trust --pgdata=$PGDATA --encoding=UTF8 --locale=en_US.UTF8 --pwfile=$PWFILE ${WALPARAM}=$PGWAL --data-checksums
+
+F_check_exit $? initdb
+
+## creating the new configuration file:
+enotify creating the new configuration file in $PGCONF
+if [ -f $PGCONF ] ; then
+	einfo "Saving the previous configuration file as " ${PGCONF}.${G_DATETIME}
+	mv $PGCONF ${PGCONF}.${G_DATETIME}
+fi
+$PGE_BIN/support-files/postgresql.conf.generator.`pge_version -r` > $PGCONF
+F_check_exit $? "Configuration file creation"
+
+enotify Creating backup directories.
+[ -d $PGE_BACKUP_DEST ] || mkdir -p -m 770 $PGE_BACKUP_DEST
+[ -d $PGE_DUMP_DEST ] || mkdir -p -m 770 $PGE_DUMP_DEST
+[ -d $PGE_ARCHIVE_DEST ] || mkdir -p -m 770 $PGE_ARCHIVE_DEST
+
+
+## creating the new hba file:
+enotify creating the new pg_hba.conf file in $PGDATA/pg_hba.conf
+if [ -f $PGDATA/pg_hba.conf ] ; then
+	einfo "Saving the previous pg_hba file as " ${PGDATA}/pg_hba.conf.${G_DATETIME}
+	mv $PGDATA/pg_hba.conf ${PGDATA}/pg_hba.conf.${G_DATETIME}
+fi
+$PGE_BIN/support-files/pg_hba.conf.generator > $PGDATA/pg_hba.conf
+F_check_exit $? "pg_hba.conf file creation"
+
+
+## creating the new ident file:
+enotify creating the new pg_ident.conf file in $PGDATA/pg_ident.conf
+if [ -f $PGDATA/pg_ident.conf ] ; then
+	einfo "Saving the previous pg_ident file as " ${PGDATA}/pg_ident.conf.${G_DATETIME}
+	mv $PGDATA/pg_ident.conf ${PGDATA}/pg_ident.conf.${G_DATETIME}
+fi
+$PGE_BIN/support-files/pg_ident.conf.generator > $PGDATA/pg_ident.conf
+F_check_exit $? "pg_ident.conf file creation"
+
+enotify "Copying SSL Server certificates"
+cp -p $PGE_BIN/support-files/ssl/server/server.key $PGDATA && cp -p $PGE_BIN/support-files/ssl/server/server.crt $PGDATA && cp -p $PGE_BIN/support-files/ssl/server/root.crt $PGDATA
+F_check_exit $? "Copy of the SSL certificates"
+chmod 600 $PGDATA/server.key $PGDATA/server.crt $PGDATA/root.crt
+
+enotify "Starting the cluster $PGE_CLUSTER"
+$PGE_BIN/pge_ctl -a start
+F_check_exit $? "Start cluster $PGE_CLUSTER"
+
+enotify "Revoking permissions on template1 from public"
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "revoke all privileges on schema public from public;" template1 
+F_check_warn $? "Revoke privilege from public in template"
+
+enotify "Revoking permissions on postgres from public"
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "revoke all privileges on schema public from public;" postgres 
+F_check_warn $? "Revoke privilege from public in postgres database"
+
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "create role pge_oper createdb createrole replication login;" postgres
+F_check_warn $? "Create role pge_oper"
+
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "create role ldap_users nologin;" postgres
+F_check_warn $? "Create role ldap_users"
+
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "create role sslcertusers nologin;" postgres
+F_check_warn $? "Create role sslcertusers"
+
+$PGHOME/bin/psql -U $PGE_SUPER -e -c "grant sslcertusers to postgres;" postgres
+F_check_warn $? "Grant sslcertusers to postgres"
+
+$PGHOME/bin/psql -U $PGE_SUPER -e -f $PGE_BIN/support-files/setup_ldap_dbas.sql -v dba_list=$PGE_ETC/dba_list
+F_check_warn $? "Create ldap_dbas group and DBA users"
+
+edebug "Stopping the server"
+$PGE_BIN/pge_ctl -a stop
+
+edebug "Starting the server"
+F_Close_Pipeout
+$PGE_BIN/pge_ctl -a start
+
+exit 0

@@ -1,0 +1,236 @@
+#!/bin/bash -l
+################################################
+# File      : pge_cluster_backup
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Backup the cluster (instance) with pg_basebackup
+# 
+
+LOCAL_PARSE_OPTIONS="t:"
+
+MUSTBE=postgres
+#JOBUSER=required  
+
+# retention in days
+RETENTION=0
+
+
+
+Cleanup () {
+	if [ $1 -eq 0 ] ; then
+		#exit 0: we may upload:
+			# backupindex (if it exists)
+			# backuplog (if it exists)
+	
+		STATUS="ok"
+		edebug "exit 0, do nothing"
+	else
+		# exit != 0
+		STATUS="error"
+		if [ $FINAL_BACKUP_DEST ] ; then
+			if [ -d $FINAL_BACKUP_DEST ] ; then
+				enotify "Please remember to cleanup $FINAL_BACKUP_DEST"
+			fi
+		fi
+	fi
+	if [ $BACKUP_ID ] ; then
+	        edebug "Updating the status of backup  $BACKUP_ID to $STATUS"
+	        $PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF >/dev/null
+        	\lo_import '$BK_INDEX'
+        	\set bkindex :LASTOID
+        	\lo_import '$LOGFILE'
+        	\set runlo :LASTOID
+		UPDATE pge_backup SET
+			status        = '$STATUS'
+			,end_time      = current_timestamp
+			,start_wal    = '$START_WAL'
+			,end_wal      = '$END_WAL'
+			,filepath='$BK_FILENAME'
+			,filesize=${BK_FILESIZE:-0}
+			,checksum='$BK_CHECKSUM'
+			,backuplog   = encode(lo_get(:runlo),'escape')
+			,backupindex = encode(lo_get(:bkindex),'escape')
+		WHERE id        = ${BACKUP_ID};
+		\lo_unlink :bkindex
+		\lo_unlink :runlo
+		\q
+EOF
+	fi
+}
+
+Usage () {
+	cat <<EOF
+ 	Usage: `basename $0` -t {full|wal}  [{Common Options}] 
+		-t TYPE		Do the backup with the specified type. Accepted values are full and wal.
+				full does the base backup using pg_basebackup.
+				wal creates an zip containing the actually archived wals.
+EOF
+}
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+function Backup_Full () {
+	edebug PGE_BACKUP_DEST=$PGE_BACKUP_DEST
+	FINAL_BACKUP_DEST=$PGE_BACKUP_DEST/$G_DATETIME
+	enotify	"Backup destination: $FINAL_BACKUP_DEST"
+
+	CMD="$PGHOME/bin/pg_basebackup -D $FINAL_BACKUP_DEST -Ft -z -l $Job -U $PGE_OPER"
+	enotify "Backup Command: $CMD"
+
+	eval $CMD 2>&1
+	F_check_exit $? "Execution of pg_basebackup"
+
+	if [ `pge_version |cut -f1 -d.` -ge 10 ] ; then
+		PG_WALFILE_NAME="select pg_walfile_name(pg_current_wal_lsn());"
+	else
+		PG_WALFILE_NAME="select pg_xlogfile_name(pg_current_xlog_location());"
+	fi
+
+	END_WAL=`pquery "${PG_WALFILE_NAME}"`
+	F_check_warn $? "Getting END_WAL"
+
+	BK_FILENAME=$FINAL_BACKUP_DEST/base.tar.gz
+	BK_FILESIZE=`stat -c %s $BK_FILENAME`
+	BK_CHECKSUM=`md5sum $BK_FILENAME | awk '{print $1}'`
+
+	tar -xvzf $BK_FILENAME -C $FINAL_BACKUP_DEST backup_label
+	F_check_warn $? "Extracting backup_label"
+	if [ $? -eq 0 ] ; then
+		START_WAL=`grep "START WAL LOCATION" $FINAL_BACKUP_DEST/backup_label | awk '{print $NF}' | cut -c -24`
+		BK_INDEX=$FINAL_BACKUP_DEST/backup_label
+	fi
+}
+
+function Backup_Wal () {
+	edebug PGE_ARCHIVE_DEST=$PGE_ARCHIVE_DEST
+	edebug PGE_SAVED_ARCHIVE=$PGE_SAVED_ARCHIVE
+	[ -d $PGE_SAVED_ARCHIVE ] || mkdir -p $PGE_SAVED_ARCHIVE
+
+	if [ `pge_version |cut -f1 -d.` -ge 10 ] ; then
+		PG_SWITCH_WAL="select pg_switch_wal();"
+	else
+		PG_SWITCH_WAL="select pg_switch_xlog();"
+	fi
+
+	enotify "Trying to force a switch log: ${PG_SWITCH_WAL}"
+	WAL_POS=`pquery "${PG_SWITCH_WAL}"`
+	F_check_warn $? "Switch log"
+	[ $? -eq 0 ]  && enotify "WAL Position: $WAL_POS"
+
+	WAL_FILE_LIST=$PGE_SAVED_ARCHIVE/wal_file_list_${G_DATETIME}.txt
+	ls -1trdp $PGE_ARCHIVE_DEST/0* | grep -v "/$" > $WAL_FILE_LIST
+
+	BK_FILENAME=$WAL_FILE_LIST
+        BK_FILESIZE=`stat -c %s $BK_FILENAME`
+        BK_CHECKSUM=`md5sum $BK_FILENAME | awk '{print $1}'`
+	BK_INDEX=$WAL_FILE_LIST
+
+	if [ -s $WAL_FILE_LIST ] ; then
+		# some files listed in the file list
+		START_WAL_PATH=`cat $WAL_FILE_LIST | grep -E '[0-9A-F]{24}$' | head -n 1`
+		START_WAL=`basename $START_WAL_PATH`
+		END_WAL_PATH=`cat $WAL_FILE_LIST | grep -E '[0-9A-F]{24}$' | tail -n 1`
+		END_WAL=`basename $END_WAL_PATH`
+	
+
+		# TODO
+		# integrate with an external library plugin
+
+		for WALPATH in `cat $WAL_FILE_LIST`  ; do
+			WAL=`basename $WALPATH`
+	        	WAL_FILESIZE=`stat -c %s $BK_FILENAME`
+			WAL_UXSTAMP=`stat -c %Y $WALPATH`
+			WAL_CHECKSUM=`md5sum $WALPATH | awk '{print $1}'`
+	        	$PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF >/dev/null
+				INSERT INTO pge_backup_wal (bsid, pg_cluster, filename, filepath, filedate, checksum)
+				values ($BACKUP_ID, '$PGE_CLUSTER', '$WAL', '$WALPATH', TO_DATE('19700101', 'YYYYMMDD')+$WAL_UXSTAMP/86400, '$WAL_CHECKSUM');
+				\q
+EOF
+			mv $WALPATH $PGE_SAVED_ARCHIVE
+		done
+	else
+		# no files to backup
+		enotify "No WAL files in the archive directory. No need to run a backup."
+		START_WAL="N/A"
+		END_WAL="N/A"
+	fi
+
+}
+
+
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		t)
+			case $OPTARG in
+				full)
+					edebug "Got parameter -t. Its value is $OPTARG"
+					;;
+				wal)
+					edebug "Got parameter -t. Its value is $OPTARG"
+					;;
+				*)
+					eerror "Invalid argument specified for -t. Use either full or wal."
+					exit 1
+					;;
+			esac
+			BACKUPTYPE=$OPTARG
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			exit 1
+			;;
+	esac
+done
+
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+if ! [ $BACKUPTYPE ] ; then
+	eerror "Please specify a backup type."
+	exit 1
+fi
+einfo "BACKUPTYPE=$BACKUPTYPE"
+
+Job=${Job}_${PGE_CLUSTER}_${BACKUPTYPE}_${G_DATETIME}
+
+F_Open_Pipeout
+
+
+BACKUP_SEQ="pge_backup_id_seq"
+BACKUP_ID=`F_sequence_nextval $BACKUP_SEQ`
+enotify "Backup ID: $BACKUP_ID"
+F_check_exit $? "Getting backup ID"
+$PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF >/dev/null
+	INSERT INTO pge_backup (id, pg_cluster, backup_type, status, start_time)
+ 	values ($BACKUP_ID, '$PGE_CLUSTER', '$BACKUPTYPE', 'running', current_timestamp);
+	\q
+EOF
+
+
+
+if [ $BACKUPTYPE == "full" ] ; then
+	# purging old backups before starting
+	if [ $PGE_BACKUP_DEST ] ; then
+		enotify "Purging old backups before starting. Retention ${RETENTION} days."
+		find $PGE_BACKUP_DEST -mtime +${RETENTION} -print
+		einfo find $PGE_BACKUP_DEST -mtime +${RETENTION} -exec rm -rf {} \;
+		find $PGE_BACKUP_DEST -mtime +${RETENTION} -exec rm -rf {} \;
+	fi
+		
+	Backup_Full
+
+fi
+if [ $BACKUPTYPE == "wal" ] ; then
+	Backup_Wal
+fi
+
+
+F_Close_Pipeout
+
+exit 0

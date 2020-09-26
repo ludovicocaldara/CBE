@@ -1,0 +1,505 @@
+#!/bin/bash -l
+################################################
+# File      : pge_database_restore
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Restore the database using one of the following schemes:
+#		1 - specify the path of a local file
+#		2 - specify the source server and the source file name
+#		3 - specify the source instance, the date
+#	      In all cases: specify the source and destination database and the destination instance.
+#             
+
+function Usage () {
+	cat <<EOF
+
+	Purpose: Restore the specified database.
+
+	Usage: `basename $0` -f file [-r sourceserver] -S sourcedb [-e destinst] -b destdb [{Common Options}]
+		  or
+	       `basename $0` -i sourceinst [-t datetime] -S sourcedb [-e destinst] -b destdb [{Common Options}]
+		  or
+	       `basename $0` -l -i sourceinst [-t datetime] -S sourcedb [{Common Options}]
+		  or
+	       `basename $0` -k id -l [{Common Options}]
+		  or
+	       `basename $0` -k id [ -e destinstance ] -b destdb [{ Common Options }]
+
+
+		-f file		If file is specified, the file will be restored from an external library (to be implemented)
+				and used for the restore. If -r specified, the file is restored from the source server.
+		-r sourceserver	If the source file has been backed up on a remote server, -r specify the name of the server.
+				It must be a valid networker client. -r can be specified only when -f is also specified.
+		-i sourceinst	If -i is specified, the last backup of the selected instance/sourcedb will be used for the restore.
+				If -t is also specified, the last backup preceding the specified date time will be used instead.
+		-t datetime	The date and time of the backup to be used for the restore. It will restore from the most recent dump
+				preceding the specified datetime. It requires the option -i.
+				The datetime must be in format "YYYY-MM-DD_HH24:MI:SS". E.g. "2016-02-15_15:26:00".
+		-S sourcedb	The name of the source database that must be restored.
+		-b destdb	The name of the destination database. It uses the current environment (for interactive mode)
+				unless the destination environment is set with -e. The destination environment must be local
+				to the server running this script.
+		-l 		List only the 10 most recent dumps for the specified source instance and database
+				 or just displays the details of a dump if used with -k
+		-k 		Restores the dump from the specific export ID (from the list got with -l and -i options).
+				If -l is specified, it just shows the details of the export without restoring.
+EOF
+}
+
+function Cleanup () {
+        if [ $1 -ne 0 ] ; then
+                # function Cleanup must update the status of the last export in case of errors
+		IMP_STATUS="error"
+        else
+		IMP_STATUS="ok"
+
+		# deletion from the filesystem should be conditional... only if dump has been restored with external library
+		#if [ $DESTFILE_NAME ] && [ -f $DESTFILE_NAME ] ; then
+		#	edebug "Import was successful, removing the dump from the filesystem."
+		#	rm $DESTFILE_NAME
+		#fi
+        fi
+	[ $REFRESH_ID ] && Update_Imp_Status
+}
+
+
+function Update_Imp_Status () {
+        edebug "Updating the status of import $REFRESH_ID  to $IMP_STATUS"
+        $PGHOME/bin/psql -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} << EOF >/dev/null
+	        \lo_import '$LOGFILE'
+		\set runlo :LASTOID
+                UPDATE $IMP_TABLE SET
+			 status        = '$IMP_STATUS'
+			,end_date      = current_timestamp
+			,dumpfile_path ='`basename $DESTFILE_NAME`'
+			,run_log_path  ='${LOGFILE}'
+			,run_log       = encode(lo_get(:runlo),'escape')
+                WHERE id = ${REFRESH_ID};
+		\lo_unlink :runlo
+                \q
+EOF
+}
+
+
+LOCAL_PARSE_OPTIONS="f:r:i:t:S:b:lk:"
+MUSTBE=postgres
+JOBUSER=${JOBUSER:-required}
+
+IMP_SEQ="pge_imports_id_seq"
+IMP_TABLE="pge_imports"
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		f)
+			edebug "Got parameter -f. Its value is $OPTARG"
+			SOURCEFILE=$OPTARG
+			;;
+		r)
+			edebug "Got parameter -r. Its value is $OPTARG"
+			SOURCESERVER=$OPTARG
+			;;
+		i)
+			edebug "Got parameter -i. Its value is $OPTARG"
+			SOURCEINSTANCE=$OPTARG
+			;;
+		t)
+			edebug "Got parameter -t. Its value is $OPTARG"
+			RESTOREDATE=$OPTARG
+			;;
+		S)
+			edebug "Got parameter -S. Its value is $OPTARG"
+			SOURCEDB=$OPTARG
+			;;
+		b)
+			edebug "Got parameter -b. Its value is $OPTARG"
+			DESTDB=$OPTARG
+			;;
+		l)
+			edebug "Got parameter -l."
+			LISTONLY="yes"
+			;;
+		k)
+			edebug "Got parameter -k."
+			# if both -k and -l then show the id, otherwise restore the id
+			KEYID=$OPTARG
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			Usage
+			F_common_usage
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			Usage
+			F_common_usage
+			exit 1
+			;;
+	esac
+done
+
+
+## if there are both -k AND -l, I just show the content of the dump in the pge_dumps table. no need to do more, can exit immediately after..
+if [ $KEYID ] && [ $LISTONLY ] ; then
+	edumpvar KEYID LISTONLY
+	enotify "Details for dump $KEYID"
+	$PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF
+	SELECT e.id as id
+		,d.server_name
+		,e.pg_cluster AS pg_cluster
+		,e.database_name AS database
+		,e.status
+		,to_char(e.start_date,'YYYY-MM-DD_HH24:MI:SS') AS start_date
+		,to_char(e.end_date,'YYYY-MM-DD_HH24:MI:SS') AS end_date
+		,e.dumpfile_path
+		,e.username
+		,e.sreq
+	FROM pge_databases_histo d
+	JOIN pge_dumps e
+		ON (d.pg_cluster=e.pg_cluster
+				AND d.database_name=e.database_name)
+		WHERE e.id=${KEYID}
+		AND date_trunc('day',d.collect_date)=date_trunc('day',e.start_date);
+	\q
+EOF
+	exit
+fi
+
+
+## parameters have already be checked for validity.
+## but I need to check if they work together. 
+if [ $SOURCEFILE ] && [ $SOURCEINSTANCE ] ; then
+	eerror "Cannot specify both -i and -f."
+	exit 1
+fi
+if [ $KEYID ] && [ $SOURCEINSTANCE ] ; then
+	eerror "Cannot specify both -i and -k."
+	exit 1
+fi
+if [ $SOURCEFILE ] && [ $KEYID ] ; then
+	eerror "Cannot specify both -k and -f."
+	exit 1
+fi
+if [ $SOURCEFILE ] && [ $RESTOREDATE ] ; then
+	eerror "Cannot specify both -t and -f."
+	exit 1
+fi
+if [ $KEYID ] && [ $RESTOREDATE ] ; then
+	eerror "Cannot specify both -t and -k."
+	exit 1
+fi
+if [ $SOURCESERVER ] && [ $SOURCEINSTANCE ] ; then
+	eerror "Cannot specify both -i and -r."
+	exit 1
+fi
+if [ $SOURCESERVER ] && [ $KEYID ] ; then
+	eerror "Cannot specify both -k and -r."
+	exit 1
+fi
+if [ $SOURCEDB ] && [ $KEYID ] ; then
+	eerror "Cannot specify both -k and -S."
+	exit 1
+fi
+
+if [ $SOURCEINSTANCE ] ; then
+	RESTOREMODE=${RESTOREMODE:-database}
+	Job=${Job}_${PGE_CLUSTER}_${DESTDB}_from_${SOURCEINSTANCE}
+fi
+
+if ! [ $KEYID ] ; then
+	if ! [ $SOURCEDB ] ; then
+		#  if I don't have a KEYID I need to know the sourcedb!
+		eerror "Please specify the source database name with the -S parameter."
+		exit 1
+	fi
+else
+	# if we have a KEYID, need to take the metadata of the dump so we can restore it! ;-)
+	RESULT=`$PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF | grep "|"
+	SELECT d.server_name||'|'||
+		e.pg_cluster||'|'||
+		e.database_name||'|'||
+		e.dumpfile_path
+	FROM pge_databases_histo d
+	JOIN pge_dumps e
+		ON (d.pg_cluster=e.pg_cluster
+				AND d.database_name=e.database_name)
+		WHERE e.id=${KEYID}
+		AND e.status='ok'
+		AND date_trunc('day',d.collect_date)=date_trunc('day',e.start_date);
+	\q
+EOF
+`
+	edumpvar RESULT
+	echo $RESULT | grep "|" >/dev/null
+	F_check_exit $? "Lookup of the dump with ID ${KEYID}"
+	SOURCESERVER=`echo $RESULT | awk -F"|" '{print $1}'`
+	SOURCEINSTANCE=`echo $RESULT | awk -F"|" '{print $2}'`
+	SOURCEDB=`echo $RESULT | awk -F"|" '{print $3}'`
+	SOURCEFILE=`echo $RESULT | awk -F"|" '{print $4}'`
+	EXPORT_ID=$KEYID
+
+	enotify "Source DB: $SOURCEDB"
+	enotify "Source server: $SOURCESERVER"
+	enotify "Dump file: $SOURCEFILE"
+
+	# we got the metadata from the keyid.
+	# now we have the same informations here as if -f, -S  and -r were passed, so we can use the same procedure
+	RESTOREMODE="dumpfile"
+fi
+
+if [ $LISTONLY ] ; then
+	# if we are in list mode , we don't really need a destination database nor the environment set
+	RESTOREMODE="list"
+else
+	# if we are NOT in list mode, we do definitely need destination environment AND database
+	F_check_pgenv_set
+	F_check_exit $? "Environment check"
+	if ! [ $DESTDB ] ; then
+		eerror "Please specify the destination database name with the -b parameter."
+		exit 1
+	fi
+fi
+
+if [ $SOURCEFILE ] ; then
+	RESTOREMODE="dumpfile"
+	# if we have a source file we got it either from -k key or -f file
+	# I change the name of the job accordingly
+	if [ $KEYID ] ; then
+		Job=${Job}_${PGE_CLUSTER}_${DESTDB}_from_id_${KEYID}
+	else
+		Job=${Job}_${PGE_CLUSTER}_${DESTDB}_from_file
+	fi
+fi
+
+
+## I need to have a restore mode, but if it is "list", I need a source instance to get the information from
+if ! [ $RESTOREMODE ] ; then
+	eerror "Please specify either -f, -k  or -i to identify the source dump."
+	exit 1
+else
+	if [ $RESTOREMODE == "list" ] ; then
+		if ! [ $SOURCEINSTANCE ] ; then
+			eerror "Please specify either -k  or -i when using list mode (-l)"
+			exit 1
+		fi
+	fi
+fi
+
+# here we should have a job name, we can open the pipe
+F_Open_Pipeout
+	
+
+# in every case I can get a RESTORE DATE if I don't have it yet. It doesn't hurt, at least, does it?.
+if [ ! $RESTOREDATE ] ; then
+	enotify "Restore date not specified, using the most recent dump."
+	RESTOREDATE=`date +"%Y-%m-%d_%H:%M:%S"`
+fi
+enotify "Restore date: $RESTOREDATE" 
+
+
+# OK, if I am just listing, I still do not need a destination environment.
+# after this, I can exit
+if [ $RESTOREMODE == "list" ] ; then
+	enotify "Listing dumps"
+        $PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF
+	WITH a AS (
+	SELECT rank() over (order by e.start_date DESC) AS mostrecent,
+		e.id as id,
+		d.server_name,
+		e.pg_cluster AS pg_cluster,
+		e.database_name AS database,
+		to_char(e.start_date,'YYYY-MM-DD_HH24:MI:SS') AS start_date,
+		regexp_replace(e.dumpfile_path, '^.+[/\\\\]', '') as dumpfile_path
+	FROM pge_databases_histo d
+	JOIN pge_dumps e
+		ON (d.pg_cluster=e.pg_cluster
+                  AND d.database_name=e.database_name)
+		WHERE d.database_name='$SOURCEDB'
+		AND status='ok'
+		AND d.pg_cluster='$SOURCEINSTANCE'
+		AND date_trunc('day',d.collect_date)=date_trunc('day',e.start_date)
+		AND start_date <to_timestamp('$RESTOREDATE','YYYY-MM-DD_HH24:MI:SS')
+	) SELECT id, server_name, pg_cluster, database, start_date, dumpfile_path
+		FROM a
+	ORDER BY mostrecent asc fetch first 10 rows only;
+	\q
+EOF
+	exit
+fi
+
+## if we are here we have: a SOURCEDB, a DESTDB, RESTOREMODE that specifies either "dumpfile" or "database",
+##  a SOURCEINSTANCE (and eventually a RESTOREDATE) if restore mode database
+##   or a SOURCEFILE (eventually a SOURCESERVER) if restore mode FILE
+
+if ! [ $PGE_DUMP_DEST ] ; then
+	if ! [ -d $PGE_BACKUP_COMMON ] ; then
+		eerror "Backup base directory $PGE_BACKUP_COMMON does not exist."
+		exit 1
+	else
+		PGE_DUMP_DEST=$PGE_BACKUP_COMMON/$PGE_CLUSTER/dump
+	fi
+fi
+einfo "Dump directory: $PGE_DUMP_DEST"
+[ -d $PGE_DUMP_DEST ] || mkdir -p -m 2750 $PGE_DUMP_DEST
+F_check_exit $? "Check/creation of dump directory"
+
+enotify "Source database: $SOURCEDB"
+enotify "Destination database: $DESTDB"
+enotify "Mode: $RESTOREMODE"
+[ $SOURCEFILE ] && enotify "Source file: $SOURCEFILE"
+[ $SOURCEINSTANCE ] && enotify "Source  instance: $SOURCEINSTANCE"
+[ $SOURCESERVER ] && enotify "Source server: $SOURCESERVER"
+
+
+## if restore mode is instance, we have to get the dump of the specified instance/database on the specified date,
+## get  the file name and nsr client  and restore as if it was restore mode file.
+if [ $RESTOREMODE == "database" ] ; then
+	F_validate_date $RESTOREDATE
+	F_check_exit $? "$RESTOREDATE: date format check"
+
+	RESULT=`$PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF | grep "|"
+		WITH a AS
+ 		 (SELECT rank() over (order by e.start_date DESC) AS mostrecent,
+		    e.id,
+		    d.server_name,
+		    e.dumpfile_path,
+		    to_char(e.start_date,'YYYY-MM-DD_HH24:MI:SS') start_date
+		  FROM pge_databases_histo d
+		  JOIN pge_dumps e
+		  ON (d.pg_cluster=e.pg_cluster
+		  AND d.database_name=e.database_name)
+		  WHERE e.pg_cluster   ='$SOURCEINSTANCE'
+		  AND e.database_name  ='$SOURCEDB'
+		  AND date_trunc('day',d.collect_date)=date_trunc('day',e.start_date)
+		  AND start_date        <to_timestamp('$RESTOREDATE','YYYY-MM-DD_HH24:MI:SS')
+		  )
+		SELECT id||'|'||server_name||'|'||start_date||'|'||dumpfile_path FROM a WHERE mostrecent=1;
+	\q
+EOF
+`	
+	edumpvar RESULT
+	echo $RESULT | grep "|" 2>/dev/null
+	F_check_exit $? "Lookup of most recent dump preceding $RESTOREDATE"
+	EXPORT_ID=`echo $RESULT | awk -F"|" '{print $1}'`
+	SOURCESERVER=`echo $RESULT | awk -F"|" '{print $2}'`
+	DUMPDATE=`echo $RESULT | awk -F"|" '{print $3}'`
+	SOURCEFILE=`echo $RESULT | awk -F"|" '{print $4}'`
+
+	enotify "The most recent dump preceding $RESTOREDATE dates $DUMPDATE."
+	enotify "Source server: $SOURCESERVER"
+	enotify "Dump file: $SOURCEFILE"
+fi
+
+if [ ! $EXPORT_ID ] ; then
+	# if I don't have en export ID it means that I have at least a dumpfile_path and a source server, I can loook it up in the central inventory
+	RESULT=`$PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF | grep "|"
+	SELECT e.id as id||'|'
+	FROM pge_databases_histo d
+	JOIN pge_dumps e
+		ON (d.pg_cluster=e.pg_cluster
+                  AND d.database_name=e.database_name)
+		WHERE dumpfile_path='$SOURCEFILE'
+		AND d.server_name='$SOURCESERVER';
+	\q
+EOF
+`	
+	edumpvar RESULT
+	echo $RESULT | grep "|" 2>/dev/null
+	err=$?
+	F_check_warn $err "Lookup of dump id"
+	if [ $err eq 0 ] ; then
+		EXPORT_ID=`echo $RESULT | awk -F"|" '{print $1}'`
+	fi
+fi
+
+REFRESH_ID=`F_sequence_nextval $IMP_SEQ`
+$PGHOME/bin/psql  -U ${PGE_REPO_USER} -h ${PGE_REPO_HOST} -p ${PGE_REPO_PORT} ${PGE_REPO_DB} <<EOF
+ INSERT INTO ${IMP_TABLE}  (
+    id, start_date, sreq, dumpfile_path, source_cluster, refresh_date, dest_cluster, source_database, dest_database, status, username, import_type, dump_id
+  )
+  VALUES
+  ( '${REFRESH_ID}', current_timestamp, '${SREQ}', '$SOURCEFILE',
+    '$SOURCEINSTANCE', TO_DATE('${RESTOREDATE}','YYYY-MM-DD_HH24:MI:SS'),
+    '$PGE_CLUSTER', '$SOURCEDB', '$DESTDB', 'running', '$JOBUSER',
+    '$RESTOREMODE', ${EXPORT_ID:-null}
+  );
+EOF
+
+#######################################################################################
+## if we are here, RESTOREMODE == dumpfile OR the file has been taken from the export history
+
+# if source server = hostname then check if the file exists
+# otherwise restore it 
+
+## DESTFILE_PATH defaults to $SOURCEFILE unless we are restoring from a remote server. 
+SOURCEFILE_BASENAME=`basename $SOURCEFILE`
+DESTFILE_PATH=$SOURCEFILE
+
+edumpvar SOURCEFILE_BASENAME DESTFILE_PATH SOURCESERVER SOURCEFILE
+
+
+if [ $SOURCESERVER ] && [ $SOURCESERVER == $HOSTNAME ] && [ -f $SOURCEFILE ] ; then
+	# we have the same source as the local host and the file is there!
+	enotify "$SOURCEFILE already exist on the server: no need to restore with external library."
+	DESTFILE_NAME=$SOURCEFILE
+else
+	## in case the source/dest instances differ, we restore to the current instance dump dest
+	DESTFILE_PATH=$PGE_DUMP_DEST
+	DESTFILE_NAME=$PGE_DUMP_DEST/$SOURCEFILE_BASENAME
+	enotify "Restoring $SOURCEFILE from remote server $SOURCESERVER to $DESTFILE_PATH."
+
+	# if the file has been restored manually (or by a previous run), we also need to skip the recover
+	if [ -f $DESTFILE_NAME ] ; then
+		enotify "The file $DESTFILE_NAME is already there. No need to recover from elsewhere."
+	else
+		# in all other cases we need to restore from an external plugin
+		## TO IMPLEMENT!
+		false
+		F_check_exit $? "Restoring from external plugin"
+	fi
+fi
+
+# if we are here somehow we should have the dumpfile, isn't it?
+if ! [ -f $DESTFILE_NAME ] ; then
+	eerror "Error identifying/restoring the source file $DESTFILE_NAME."
+	exit 1
+fi
+
+enotify "Starting restore of database $DESTDB on PGE_CLUSTER $PGE_CLUSTER from file $DESTFILE_NAME"
+DBEXISTS=`$PGHOME/bin/psql -U $PGE_SUPER -q -t -A -c "select datname from pg_database where not datistemplate and datname='$DESTDB';" postgres | grep --color=auto -v ^$ | wc -l`
+
+if [ $DBEXISTS -ge 1 ] ; then
+	KILLSQL="SELECT pg_terminate_backend(pg_stat_activity.pid) FROM pg_stat_activity WHERE datname = '$DESTDB';"
+	edumpvar KILLSQL
+	pquery "$KILLSQL"
+	F_check_warn $? "Killing existing connections"
+
+	pquery "drop database $DESTDB;"
+	F_check_warn $? "Dropping existing database"
+fi
+
+CREATEDB_SQL=`strings $DESTFILE_NAME | grep "CREATE DATABASE"`
+COLLATE=`echo $CREATEDB_SQL | sed -e "s/\(.*\)LC_COLLATE = '\([^']*\)'\(.*\)/\2/"`
+CTYPE=`echo $CREATEDB_SQL | sed -e "s/\(.*\)LC_CTYPE = '\([^']*\)'\(.*\)/\2/"`
+
+edumpvar CREATEDB_SQL COLLATE CTYPE
+
+enotify "(re)creating the destination database."
+edebug $PGE_BIN/pge_database_create -d $DESTDB ${COLLATE:+"-c"} $COLLATE ${CTYPE:+"-t"} $CTYPE -u $JOBUSER
+$PGE_BIN/pge_database_create -d $DESTDB ${COLLATE:+"-c"} $COLLATE ${CTYPE:+"-t"} $CTYPE -u $JOBUSER
+F_check_exit $? "Destination database creation"
+
+
+	
+#CMD="$PGHOME/bin/pg_restore -U $PGE_SUPER -c -C --if-exists -d $DESTDB $DESTFILE_NAME" 
+CMD="$PGHOME/bin/pg_restore -U $PGE_SUPER -d $DESTDB $DESTFILE_NAME" 
+einfo "Restore command: $CMD" 
+eval $CMD
+F_check_exit $? "Restore of database $DATABASE"
+	
+F_Close_Pipeout
+
+exit 0

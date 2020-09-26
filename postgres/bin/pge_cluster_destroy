@@ -1,0 +1,62 @@
+#!/bin/bash -l
+
+################################################
+# File      : pge_cluster_destroy
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Destroys the cluster (instance), needs a special variable for confirmation
+#
+
+
+MUSTBE=postgres
+
+. ~/.PGE
+. ${PGE_ETC}/init_script.conf
+
+
+
+### check if environment variables for postgreSQL are set and exit if not.
+F_check_pgenv_set
+F_check_exit $? "Environment check"
+
+
+Job=${Job}_${PGE_CLUSTER}
+edebug New Job name: $Job
+
+F_Open_Pipeout
+
+if ! [ $CONFIRM_CLUSTER_DESTROY ] ; then
+	eerror "Please set the variable \$CONFIRM_CLUSTER_DESTROY before running this script if you really intend to destroy the cluster $PGE_CLUSTER and all its data!"
+	exit 1
+fi
+
+enotify "All variables set, including \$CONFIRM_CLUSTER_DESTROY."
+
+enotify Stopping the cluster $PGE_CLUSTER
+$PGE_BIN/pge_ctl -a status -s -Z > /dev/null
+if [ $? -ne 0 ] ; then
+	enotify "Cluster $PGE_CLUSTER already stopped."
+else
+	$PGE_BIN/pge_ctl -a stop -Z
+	F_check_exit $? "Stop of the cluster"
+fi
+
+
+enotify "Purging directory $PGDATA."
+[ -d $PGDATA ] && rm -rf $PGDATA
+enotify "Purging directory $PGE_ADMIN."
+[ -d $PGE_ADMIN ] && rm -rf $PGE_ADMIN
+enotify "Purging directory $PGWAL"
+[ -d $PGWAL ] && rm -rf $PGWAL
+
+enotify "Purging backup directories."
+if [ $PGE_BACKUP_COMMON ] ; then
+	if [ $PGE_CLUSTER ] ; then
+		[ -d $PGE_BACKUP_COMMON/$PGE_CLUSTER ] || rm -rf $PGE_BACKUP_COMMON/$PGE_CLUSTER
+	fi
+fi
+
+enotify "Please comment out the entry in $PGE_TAB."
+
+
+F_Close_Pipeout
