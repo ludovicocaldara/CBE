@@ -1,0 +1,11 @@
+cat <<EOF
+# TYPE  DATABASE      USER          ADDRESS       METHOD
+local   all           pge_oper                    peer  map=dba
+local   replication   pge_oper                    peer  map=dba
+host    all           +ldap_users   0.0.0.0/0     ldap ldapserver=ldap.ludovicocaldara.net ldapport=389 ldapprefix="uid=" ldapsuffix=",ou=people,dc=ludovicocaldara,dc=net"
+host    all           +ldap_dbas    0.0.0.0/0     ldap ldapserver=ldap.ludovicocaldara.net ldapport=389 ldapprefix="uid=" ldapsuffix=",ou=people,dc=ludovicocaldara,dc=net"
+hostssl all           +sslcertusers 0.0.0.0/0     trust clientcert=1
+local   all           postgres                    peer  map=dba
+host    all           all           0.0.0.0/0     md5
+EOF
+

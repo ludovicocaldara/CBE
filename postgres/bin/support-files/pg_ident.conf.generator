@@ -1,0 +1,7 @@
+cat <<EOF
+#map	osuser		dbuser
+dba     postgres        postgres
+dba     ludovico    	postgres
+dba     postgres        pge_oper
+dba     ludovico    	pge_oper
+EOF

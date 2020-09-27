@@ -4,7 +4,7 @@
 # Author    : Ludovico Caldara
 # Version   : 0.1
 # Purpose   : Wrapper for pg_ctl script. It must run as postgres user.
-#		It redirects the standard output of postgres in $PGOUTPUT
+#		It redirects the standard output of postgres in $CBE_PGOUTPUT
 #		(as set by the environment script)
 #		It logs every execution into the traces directory (as all other scripts)
 #
@@ -21,11 +21,13 @@ EOF
 LOCAL_PARSE_OPTIONS="a:"
 MUSTBE=postgres
 
-. ~/.PGE
-. ${PGE_ETC}/init_script.conf
+CBE_BASE=${CBE_BASE:-~/CBE}
+CBE_HOME=${CBE_HOME:-$CBE_BASE/CBE}
+. $CBE_HOME/postgres/init_script.conf
+
 
 ### check if environment variables for postgreSQL are set and exit if not.
-F_check_pgenv_set
+F_check_env_set
 F_check_exit $? "Environment check"
 
 while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
@@ -50,40 +52,40 @@ if ! [ $PG_CTL_ACTION ] ; then
 	exit 1
 fi
 
-Job=${Job}_${PGE_CLUSTER}_${PG_CTL_ACTION}
+Job=${Job}_${CBE_PG_CLUSTER}_${PG_CTL_ACTION}
 edebug New Job name: $Job
 
-F_Open_Pipeout
+F_start_logging
 case $PG_CTL_ACTION in
 	start)
 		# start -w -l logfile (wait and append to logfile)
 		einfo "Start requested".
-		[ -d `dirname $PGOUTPUT` ] || mkdir -p -m 770 `dirname $PGOUTPUT`
-		$PGHOME/bin/pg_ctl start -w -o "-p $PGPORT" -D $PGDATA -l $PGOUTPUT
+		[ -d `dirname $CBE_PGOUTPUT` ] || mkdir -p -m 770 `dirname $CBE_PGOUTPUT`
+		$CBE_PGHOME/bin/pg_ctl start -w -o "-p $PGPORT" -D $PGDATA -l $CBE_PGOUTPUT
 		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
 		;;
 	stop)
 		# stop -m fast
 		einfo "Stop requested".
-		$PGHOME/bin/pg_ctl stop -m fast
+		$CBE_PGHOME/bin/pg_ctl stop -m fast
 		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
 		;;
 	restart)
 		# restart -w -m fast 
 		einfo "Restart requested".
-		$PGHOME/bin/pg_ctl restart -w -m fast
+		$CBE_PGHOME/bin/pg_ctl restart -w -m fast
 		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
 		;;
 	reload)
 		# reload 
 		einfo "Reload requested".
-		$PGHOME/bin/pg_ctl reload
+		$CBE_PGHOME/bin/pg_ctl reload
 		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
 		;;
 	status)
 		# status
 		einfo "Status requested".
-		$PGHOME/bin/pg_ctl status
+		$CBE_PGHOME/bin/pg_ctl status
 		F_check_exit $? "PostgreSQL $PG_CTL_ACTION"
 		;;
 	*)
@@ -91,4 +93,4 @@ case $PG_CTL_ACTION in
 		exit 1
 		;;
 esac
-F_Close_Pipeout
+F_stop_logging

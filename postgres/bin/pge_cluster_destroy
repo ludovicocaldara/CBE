@@ -10,53 +10,53 @@
 
 MUSTBE=postgres
 
-. ~/.PGE
-. ${PGE_ETC}/init_script.conf
-
+CBE_BASE=${CBE_BASE:-~/CBE}
+CBE_HOME=${CBE_HOME:-$CBE_BASE/CBE}
+. $CBE_HOME/postgres/init_script.conf
 
 
 ### check if environment variables for postgreSQL are set and exit if not.
-F_check_pgenv_set
+F_check_env_set
 F_check_exit $? "Environment check"
 
 
-Job=${Job}_${PGE_CLUSTER}
+Job=${Job}_${CBE_PG_CLUSTER}
 edebug New Job name: $Job
 
-F_Open_Pipeout
+F_start_logging
 
 if ! [ $CONFIRM_CLUSTER_DESTROY ] ; then
-	eerror "Please set the variable \$CONFIRM_CLUSTER_DESTROY before running this script if you really intend to destroy the cluster $PGE_CLUSTER and all its data!"
+	eerror "Please set the variable \$CONFIRM_CLUSTER_DESTROY before running this script if you really intend to destroy the cluster $CBE_PG_CLUSTER and all its data!"
 	exit 1
 fi
 
 enotify "All variables set, including \$CONFIRM_CLUSTER_DESTROY."
 
-enotify Stopping the cluster $PGE_CLUSTER
-$PGE_BIN/pge_ctl -a status -s -Z > /dev/null
+enotify Stopping the cluster $CBE_PG_CLUSTER
+$CBE_PG_BIN/pge_ctl -a status -s -Z > /dev/null
 if [ $? -ne 0 ] ; then
-	enotify "Cluster $PGE_CLUSTER already stopped."
+	enotify "Cluster $CBE_PG_CLUSTER already stopped."
 else
-	$PGE_BIN/pge_ctl -a stop -Z
+	$CBE_PG_BIN/pge_ctl -a stop -Z
 	F_check_exit $? "Stop of the cluster"
 fi
 
 
 enotify "Purging directory $PGDATA."
 [ -d $PGDATA ] && rm -rf $PGDATA
-enotify "Purging directory $PGE_ADMIN."
-[ -d $PGE_ADMIN ] && rm -rf $PGE_ADMIN
-enotify "Purging directory $PGWAL"
-[ -d $PGWAL ] && rm -rf $PGWAL
+enotify "Purging directory $CBE_PGADMIN."
+[ -d $CBE_PGADMIN ] && rm -rf $CBE_PGADMIN
+enotify "Purging directory $CBE_PGWAL"
+[ -d $CBE_PGWAL ] && rm -rf $CBE_PGWAL
 
 enotify "Purging backup directories."
-if [ $PGE_BACKUP_COMMON ] ; then
-	if [ $PGE_CLUSTER ] ; then
-		[ -d $PGE_BACKUP_COMMON/$PGE_CLUSTER ] || rm -rf $PGE_BACKUP_COMMON/$PGE_CLUSTER
+if [ $CBE_PG_BACKUP_COMMON ] ; then
+	if [ $CBE_PG_CLUSTER ] ; then
+		[ -d $CBE_PG_BACKUP_COMMON/$CBE_PG_CLUSTER ] || rm -rf $CBE_PG_BACKUP_COMMON/$CBE_PG_CLUSTER
 	fi
 fi
 
-enotify "Please comment out the entry in $PGE_TAB."
+enotify "Please comment out the entry in $CBE_PGTAB."
 
 
-F_Close_Pipeout
+F_stop_logging
