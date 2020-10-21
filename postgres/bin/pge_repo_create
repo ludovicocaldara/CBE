@@ -1,0 +1,82 @@
+#!/bin/bash -l
+################################################
+# File      : pge_database_create
+# Author    : Ludovico Caldara
+# Version   : 0.1
+# Purpose   : Create the specific database.
+#             
+
+function Usage () {
+	cat <<EOF
+	Purpose: Create the repository in the instance using the specified database name.
+	Usage: `basename $0` -d NAME [{Common Options}]
+		-d NAME		Create database NAME.
+EOF
+}
+
+LOCAL_PARSE_OPTIONS="d:"
+MUSTBE=postgres
+JOBUSER=${JOBUSER:-required}
+
+CBE_BASE=${CBE_BASE:-~/CBE}
+CBE_HOME=${CBE_HOME:-$CBE_BASE/CBE}
+. $CBE_HOME/postgres/init_script.conf
+
+F_start_logging
+
+while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+	case $opt in
+		d)
+			edebug "Got parameter -d. Its value is $OPTARG"
+			DATABASE_NAME=$OPTARG
+			;;
+		\?)
+			eerror "Invalid option: -$OPTARG"
+			Usage
+			F_common_usage
+			exit 1
+			;;
+		:)
+			eerror "Option -$OPTARG requires an argument."
+			Usage
+			F_common_usage
+			exit 1
+			;;
+	esac
+done
+
+## an environment must be set either with pgenv or with the -e parameter
+F_check_env_set
+F_check_exit $? "Environment check"
+
+if ! [ $DATABASE_NAME ] ; then
+	eerror "Please specify the repository database name with the option -d NAME."
+	exit 1
+fi
+
+# we are creating the repo, so no repo yet!
+export CBE_PG_LOG_REPO=NO
+$CBE_PG_BIN/pge_database_create -d $DATABASE_NAME 
+
+F_check_exit $? "Database creation"
+
+
+cat <<EOF > $CBE_PG_REPO_CONF
+export CBE_PG_REPO_HOST=$HOSTNAME
+export CBE_PG_REPO_PORT=$PGPORT
+export CBE_PG_REPO_DB=$DATABASE_NAME
+export CBE_PG_REPO_USER=${DATABASE_NAME}_user
+export CBE_PG_REPO_CONN="-U ${DATABASE_NAME}_user -h $HOSTNAME -p $PGPORT $DATABASE_NAME"
+EOF
+
+. $CBE_PG_REPO_CONF
+
+$CBE_PGHOME/bin/psql -U ${DATABASE_NAME}_owner -h $CBE_PG_REPO_HOST -p $CBE_PG_REPO_PORT -q --echo-all -f "$CBE_PG_SQL/00_init_repo.sql" $CBE_PG_REPO_DB
+
+
+
+# PGPASSFILE
+
+F_stop_logging
+
+exit 0

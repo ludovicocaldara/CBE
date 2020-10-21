@@ -17,21 +17,21 @@ EOF
 }
 
 function Cleanup () {
-	if [ "$LOG_REPO" == "YES" ] ; then
+	if [ "$CBE_PG_LOG_REPO" == "YES" ] ; then
 		TAB_NAME='pge_database_create'
 		SEQ_NAME='pge_database_create_id_seq'
 
 		edumpvar PGPASSFILE
 		SEQ_ID=`F_sequence_nextval $SEQ_NAME`
-	        F_check_exit $? "Getting sequence nextval, problems with the database"
+	        F_check_exit $? "Getting sequence nextval"
 
 		if [ $1 -ne 0 ] ; then
 			STATUS='error'
 		else
 			STATUS='ok'
 		fi
-        	$PGHOME/bin/psql ${PGE_REPO_CONN} << EOF
-		\lo_import '$LOGFILE'
+        	$CBE_PGHOME/bin/psql ${CBE_PG_REPO_CONN} << EOF
+		\lo_import '$CBE_LOGFILE'
 		\set lo :LASTOID
 		INSERT INTO $TAB_NAME ( id
 		 	, start_date
@@ -46,16 +46,16 @@ function Cleanup () {
 			, username
 			, log
 		) VALUES ( $SEQ_ID
-		 	, to_timestamp('${G_DATETIME}','YYYYMMDD_HH24MISS')
+		 	, to_timestamp('${CBE_DATETIME}','YYYYMMDD_HH24MISS')
 			, current_timestamp
 			, '$STATUS'
 			, '${DATABASE_NAME}'
 			, '$LCTYPE'
 			, '$LCCOLLATE'
-			, '${PGE_CLUSTER}'
+			, '${CBE_PG_CLUSTER}'
 			, '$HOSTNAME'
-			, '${SREQ}'
-			, '${JOBUSER}'
+			, '${CBE_SREQ}'
+			, '${CBE_JOBUSER}'
 			, encode(lo_get(:lo),'escape')
 		);
 		\lo_unlink :lo
@@ -65,15 +65,15 @@ EOF
 	fi
 }
 
-LOCAL_PARSE_OPTIONS="d:c:t:"
-MUSTBE=postgres
-JOBUSER=${JOBUSER:-required}
+CBE_PARSE_OPTIONS="d:c:t:"
+CBE_MUSTBE=postgres
+CBE_JOBUSER=${CBE_JOBUSER:-required}
 
-. ~/.PGE
-. ${PGE_ETC}/init_script.conf
+CBE_BASE=${CBE_BASE:-~/CBE}
+CBE_HOME=${CBE_HOME:-$CBE_BASE/CBE}
+. $CBE_HOME/postgres/init_script.conf
 
-
-while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
+while getopts ":${CBE_PARSE_OPTIONS}${CBE_PR_PARSE_OPTIONS}" opt ; do
 	case $opt in
 		d)
 			edebug "Got parameter -d. Its value is $OPTARG"
@@ -103,7 +103,7 @@ while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
 done
 
 ## an environment must be set either with pgenv or with the -e parameter
-F_check_pgenv_set
+F_check_env_set
 F_check_exit $? "Environment check"
 
 if ! [ $DATABASE_NAME ] ; then
@@ -111,11 +111,11 @@ if ! [ $DATABASE_NAME ] ; then
 	exit 1
 fi
 
-LOG_REPO="YES"
+CBE_PG_LOG_REPO=${CBE_PG_LOG_REPO:-"YES"}
 
-Job=${Job}_${PGE_CLUSTER}_${DATABASE_NAME}
+Job=${Job}_${CBE_PG_CLUSTER}_${DATABASE_NAME}
 
-F_Open_Pipeout
+F_start_logging
 
 TEMPLATE0=""
 [ $LCTYPE ] || [ $LCCOLLATE ] && TEMPLATE0="TEMPLATE=template0"
@@ -126,7 +126,7 @@ edebug TEMPLATE0 LCTYPE LCCOLLATE
 einfo "New database name: $DATABASE_NAME"
 
 enotify "Creating the database $DATABASE_NAME"
-$PGHOME/bin/psql -e -U $PGE_SUPER postgres <<EOF
+$CBE_PGHOME/bin/psql -e -U $CBE_PG_SUPER postgres <<EOF
 	\set ON_ERROR_STOP true
 	create database ${DATABASE_NAME} ${LCTYPE:+LC_CTYPE='${LCTYPE}'} ${LCCOLLATE:+LC_COLLATE='${LCCOLLATE}'} $TEMPLATE0;
 EOF
@@ -138,10 +138,10 @@ OWNER_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='
 USER_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='${DATABASE_NAME}_user';"`
 READ_EXISTS=`pquery "SELECT 'EXISTS' FROM  pg_catalog.pg_user WHERE  usename ='${DATABASE_NAME}_read';"`
 
-PASS_OWNER=`F_random_password 32`
-PASS_USER=`F_random_password 32`
-PASS_READ=`F_random_password 32`
-$PGHOME/bin/psql -e -U $PGE_SUPER $DATABASE_NAME <<EOF
+PASS_OWNER=`F_genpasswd 32`
+PASS_USER=`F_genpasswd 32`
+PASS_READ=`F_genpasswd 32`
+$CBE_PGHOME/bin/psql -e -U $CBE_PG_SUPER $DATABASE_NAME <<EOF
 	\set ON_ERROR_STOP true
 	revoke all privileges on schema public from public;
 	-- create base users
@@ -183,24 +183,24 @@ F_check_exit $? "Create users and fix permissions on $DATABASE_NAME"
 
 
 if [ "$OWNER_EXISTS" == "EXISTS" ] ; then
-	PASS_OWNER="The account already exists, the password did not change."
+	PASS_OWNER=""
 	einfo "The account ${DATABASE_NAME}_owner already exists, the password did not change."
 fi
 if [ "$USER_EXISTS" == "EXISTS" ] ; then
-	PASS_USER="The account already exists, the password did not change."
+	PASS_USER=""
 	einfo "The account ${DATABASE_NAME}_user already exists, the password did not change."
 fi
 if [ "$READ_EXISTS" == "EXISTS" ] ; then
-	PASS_READ="The account already exists, the password did not change."
+	PASS_READ=""
 	einfo "The account ${DATABASE_NAME}_read already exists, the password did not change."
 fi
 
-F_Close_Pipeout
+F_stop_logging
 
 edebug "Connection variables:"
 edebug "PGHOST=`hostname`"
 edebug "PGPORT=$PGPORT"
-edebug "PGE_CLUSTER=$PGE_CLUSTER"
+edebug "CBE_PG_CLUSTER=$CBE_PG_CLUSTER"
 edebug "DATABASE=$DATABASE_NAME"
 edebug "OWNER=${DATABASE_NAME}_owner"
 edebug "OWNER_PASS=${PASS_OWNER}"
@@ -209,25 +209,42 @@ edebug "USER_PASS=${PASS_USER}"
 edebug "READ=${DATABASE_NAME}_read"
 edebug "READ_PASS=${PASS_READ}"
 
-(cat <<EOF
-Creation of database $DATABASE_NAME completed successfully on instance $PGE_CLUSTER.
+#(cat <<EOF
+#Creation of database $DATABASE_NAME completed successfully on instance $CBE_PG_CLUSTER.
+#
+#Please forward this email to the right people.
+#
+#Connection variables:
+#PGHOST    =`hostname`
+#PGPORT    = $PGPORT
+#CBE_PG_CLUSTER= $CBE_PG_CLUSTER
+#DATABASE  = $DATABASE_NAME
+#OWNER     = ${DATABASE_NAME}_owner
+#OWNER_PASS= ${PASS_OWNER}
+#USER      = ${DATABASE_NAME}_user
+#USER_PASS = ${PASS_USER}
+#READ      = ${DATABASE_NAME}_read
+#READ_PASS = ${PASS_READ}
+#
+#EOF
+#) | mailx -s "Database $DATABASE_NAME created on instance $CBE_PG_CLUSTER" $CBE_PG_MAILINGLIST
 
-Please forward this email to the right people.
-
-Connection variables:
-PGHOST    =`hostname`
-PGPORT    = $PGPORT
-PGE_CLUSTER= $PGE_CLUSTER
-DATABASE  = $DATABASE_NAME
-OWNER     = ${DATABASE_NAME}_owner
-OWNER_PASS= ${PASS_OWNER}
-USER      = ${DATABASE_NAME}_user
-USER_PASS = ${PASS_USER}
-READ      = ${DATABASE_NAME}_read
-READ_PASS = ${PASS_READ}
-
+if [ "$PASS_OWNER" != "" ] ; then
+	cat <<EOF >> $PGPASSFILE
+`hostname -s`:$PGPORT:$DATABASE_NAME:${DATABASE_NAME}_owner:${PASS_OWNER}
 EOF
-) | mailx -s "Database $DATABASE_NAME created on instance $PGE_CLUSTER" $PGE_MAILINGLIST
+fi
 
+if [ "$PASS_USER" != "" ] ; then
+	cat <<EOF >> $PGPASSFILE
+`hostname -s`:$PGPORT:$DATABASE_NAME:${DATABASE_NAME}_user:${PASS_USER}
+EOF
+fi
+
+if [ "$PASS_READ" != "" ] ; then
+	cat <<EOF >> $PGPASSFILE
+`hostname -s`:$PGPORT:$DATABASE_NAME:${DATABASE_NAME}_read:${PASS_READ}
+EOF
+fi
 
 exit 0
