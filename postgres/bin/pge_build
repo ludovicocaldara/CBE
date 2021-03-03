@@ -39,11 +39,14 @@ EOF
 }
 
 F_version_list() {
-curl -s http://ftp.postgresql.org/pub/source/ | grep Directory | grep 'class="n"' | awk -F'/">v' '{print $2}' | awk -F'<' '{print $1}'
+enotify here
+
+curl -s http://ftp.postgresql.org/pub/source/ |  awk -F'/">v' '{print $2}' | awk -F'/<' '{print $1}'
 }
 
 CBE_HOME=${CBE_HOME:-~/CBE}
 . $CBE_HOME/postgres/init_script.conf
+
 
 while getopts ":${LOCAL_PARSE_OPTIONS}${G_PARSE_OPTIONS}" opt ; do
 	case $opt in

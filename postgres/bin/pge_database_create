@@ -111,7 +111,7 @@ if ! [ $DATABASE_NAME ] ; then
 	exit 1
 fi
 
-CBE_PG_LOG_REPO=${CBE_PG_LOG_REPO:-"YES"}
+CBE_PG_LOG_REPO=${CBE_PG_LOG_REPO:-"NO"}
 
 Job=${Job}_${CBE_PG_CLUSTER}_${DATABASE_NAME}
 
