@@ -41,7 +41,7 @@ EOF
 F_version_list() {
 enotify here
 
-curl -s http://ftp.postgresql.org/pub/source/ |  awk -F'/">v' '{print $2}' | awk -F'/<' '{print $1}'
+curl -s http://ftp.postgresql.org/pub/source/ |  awk -F'/">v' '{print $2}' | awk -F'/<' '{print $1}' | sort -n
 }
 
 CBE_HOME=${CBE_HOME:-~/CBE}
@@ -145,7 +145,7 @@ export PATH=$CBE_PGHOME/bin:$CBE_PG_BIN:$CUSTOM_PATH;
 
 
 
-pushd /u01/app/postgres/src/
+pushd $CBE_PG_SOURCE_BASE
 rm -rf pgaudit/
 git clone https://github.com/pgaudit/pgaudit.git
 pushd pgaudit/
