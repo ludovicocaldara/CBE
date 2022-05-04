@@ -23,6 +23,7 @@ CBE_HOME=${CBE_HOME:-$CBE_BASE/CBE}
 
 # Set passwordfile and set random password if it does not exist
 PWFILE=$CBE_PG_ETC/.pgpwfile
+[ -d $CBE_PG_ETC ] || mkdir $CBE_PG_ETC
 [ -f $PWFILE ] || F_genpasswd > $PWFILE
 
 ### check if environment variables for postgreSQL are set and exit if not.
